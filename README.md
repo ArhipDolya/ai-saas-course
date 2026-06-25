@@ -1,2 +1,0 @@
-# ai-saas-course
-test
