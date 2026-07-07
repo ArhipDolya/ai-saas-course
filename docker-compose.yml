@@ -1,6 +1,8 @@
 services:
   bot:
     build: .
+    env_file:
+      - .env
     volumes:
       - .:/app
     command: ["watchfiles", "python -m app.main", "app", ".env"]
