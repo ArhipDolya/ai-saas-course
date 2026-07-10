@@ -37,9 +37,46 @@ python -m app.main
 python -m app.check_database
 ```
 
+## API
+
+Запуск API:
+
+```bash
+uvicorn app.api:app --reload
+```
+
+Endpoint для майбутнього React-фронтенду:
+
+```text
+GET /api/transactions/
+GET /api/summary/
+```
+
+## Frontend
+
+Адмінка створена на `React + Vite`.
+
+Локальна адреса:
+
+```text
+http://localhost:5173
+```
+
+Backend API у Docker:
+
+```text
+http://localhost:8001
+```
+
 ## Docker
 
-Запуск бота:
+Запуск backend API та frontend:
+
+```bash
+docker compose up --build api frontend
+```
+
+Запуск усіх сервісів:
 
 ```bash
 docker compose up --build
