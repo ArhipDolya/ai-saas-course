@@ -53,6 +53,31 @@ body {
   line-height: 1.15;
 }
 
+.dashboard__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.view-button {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid #d6c8f6;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #5b21b6;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.view-button--active {
+  border-color: #6d28d9;
+  background: #6d28d9;
+  color: #ffffff;
+}
+
 .dashboard__grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -100,10 +125,47 @@ body {
   background: #ffffff;
 }
 
+.transactions__toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 14px 18px;
+  border-bottom: 1px solid #e4e8df;
+}
+
+.transaction-filters {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid #d6c8f6;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.filter-button {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-right: 1px solid #d6c8f6;
+  background: #ffffff;
+  color: #5b21b6;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.filter-button:last-child {
+  border-right: 0;
+}
+
+.filter-button--active {
+  background: #6d28d9;
+  color: #ffffff;
+}
+
 .transactions__header,
 .transactions__row {
   display: grid;
-  grid-template-columns: 180px 140px minmax(0, 1fr);
+  grid-template-columns: 180px 140px minmax(0, 1fr) 220px;
   gap: 16px;
   align-items: center;
   padding: 14px 18px;
@@ -131,6 +193,49 @@ body {
   overflow-wrap: anywhere;
 }
 
+.transactions__notice {
+  padding: 12px 18px;
+  border-bottom: 1px solid #eef2eb;
+  color: #b83226;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.transactions__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #d9ded5;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26342b;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.row-button--ghost {
+  color: #6d28d9;
+}
+
+.row-button--danger {
+  border-color: #b83226;
+  background: #b83226;
+  color: #ffffff;
+}
+
+.row-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .transactions__empty {
   display: grid;
   min-height: 280px;
@@ -138,6 +243,115 @@ body {
   padding: 32px 18px;
   color: #738177;
   font-size: 15px;
+}
+
+.form-panel {
+  width: min(1120px, 100%);
+  margin-right: auto;
+  margin-left: auto;
+  border: 1px solid #d9ded5;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.auth-panel {
+  width: min(420px, 100%);
+}
+
+.auth-form {
+  display: grid;
+  gap: 18px;
+  padding: 20px;
+}
+
+.transaction-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  padding: 20px;
+}
+
+.form-field {
+  display: grid;
+  gap: 8px;
+}
+
+.form-field--wide,
+.form-actions {
+  grid-column: 1 / -1;
+}
+
+.form-field label {
+  color: #5b6c61;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.form-field input,
+.form-field select,
+.form-field textarea {
+  width: 100%;
+  border: 1px solid #d9ded5;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17211c;
+  font: inherit;
+  font-size: 15px;
+}
+
+.form-field input,
+.form-field select {
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.form-field textarea {
+  resize: vertical;
+  padding: 12px;
+}
+
+.form-field input:focus,
+.form-field select:focus,
+.form-field textarea:focus {
+  border-color: #6d28d9;
+  outline: 2px solid #ede5ff;
+}
+
+.field-error,
+.form-error {
+  color: #b83226;
+  font-size: 13px;
+}
+
+.form-message {
+  color: #1f7a3a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.form-actions button {
+  min-height: 42px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 8px;
+  background: #6d28d9;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.form-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
 @media (max-width: 720px) {
@@ -152,6 +366,10 @@ body {
   .dashboard__grid,
   .transactions__header,
   .transactions__row {
+    grid-template-columns: 1fr;
+  }
+
+  .transaction-form {
     grid-template-columns: 1fr;
   }
 }

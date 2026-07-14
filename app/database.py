@@ -60,3 +60,6 @@ async def check_database_connection(engine: AsyncEngine) -> None:
 async def create_database_tables(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await connection.execute(
+            text("alter table transactions add column if not exists description varchar(500)")
+        )
