@@ -10,6 +10,7 @@
 ```env
 BOT_TOKEN=your_real_token_here
 DATABASE_URL=postgresql://your_database_connection_string
+ADMIN_PASSWORD=your_admin_password_here
 ```
 
 3. Встанови залежності:
@@ -48,13 +49,35 @@ uvicorn app.api:app --reload
 Endpoint для майбутнього React-фронтенду:
 
 ```text
+POST /api/admin/verify-password
 GET /api/transactions/
+POST /api/transactions
+DELETE /api/transactions/{id}
 GET /api/summary/
 ```
+
+POST `/api/admin/verify-password` перевіряє пароль адміністратора з `.env`.
+
+POST `/api/transactions` приймає:
+
+```json
+{
+  "type": "expense",
+  "amount": "120.00",
+  "category": "кава",
+  "description": "необов'язково",
+  "date": "2026-07-14T12:00:00Z"
+}
+```
+
+Для створення операції потрібно передати заголовок `X-Admin-Auth`.
+
+DELETE `/api/transactions/{id}` видаляє операцію за додатним числовим `id`.
 
 ## Frontend
 
 Адмінка створена на `React + Vite`.
+В адмінці є режим перегляду операцій і форма створення фінансової операції.
 
 Локальна адреса:
 
