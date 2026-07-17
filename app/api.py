@@ -1,3 +1,5 @@
+import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -8,10 +10,11 @@ from typing import Any, AsyncIterator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Path, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.check_llm import DEFAULT_LLM_MODEL
 from app.database import (
     check_database_connection,
     create_database_engine,
@@ -42,6 +45,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await create_database_tables(engine)
     app.state.sessionmaker = create_sessionmaker(engine)
     app.state.admin_password = admin_password
+    app.state.llm_api_key = os.getenv("LLM_API_KEY")
+    app.state.llm_model = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
     logging.info("API database connection OK")
 
     try:
@@ -111,6 +116,29 @@ class AdminPasswordPayload(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class FinancialAnalysis(BaseModel):
+    summary: str
+    top_expense_categories: list[str]
+    risks: list[str]
+    advice: list[str]
+
+
+class LLMAuthenticationError(Exception):
+    pass
+
+
+class LLMModelError(Exception):
+    pass
+
+
+class LLMUnavailableError(Exception):
+    pass
+
+
+class LLMInvalidResponseError(Exception):
+    pass
+
+
 def require_admin_password(request: Request, password: str) -> None:
     admin_password = request.app.state.admin_password
     if not compare_digest(password.encode("utf-8"), admin_password.encode("utf-8")):
@@ -138,6 +166,100 @@ def transaction_to_json(
         "description": transaction.description,
         "created_at": transaction.created_at.isoformat(),
     }
+
+
+def transaction_to_ai_payload(transaction: Transaction, category: Category) -> dict[str, str]:
+    return {
+        "type": category.type.value,
+        "amount": str(transaction.amount),
+        "category": category.name,
+        "description": transaction.description or "",
+        "created_at": transaction.created_at.isoformat(),
+    }
+
+
+def build_financial_analysis_prompt(transactions: list[dict[str, str]]) -> str:
+    transactions_json = json.dumps(transactions, ensure_ascii=False, indent=2)
+
+    return f"""
+Проаналізуй список фінансових операцій користувача.
+
+Завдання:
+- дай короткий загальний висновок по цих операціях;
+- визнач, на які категорії товарів або послуг було витрачено найбільше грошей;
+- знайди можливі фінансові ризики;
+- дай рівно 3 поради з фінансової грамотності;
+- відповідай українською мовою;
+- не вигадуй операції, яких немає у списку.
+
+Поверни тільки JSON без Markdown і без додаткового тексту.
+JSON має мати рівно такі поля:
+{{
+  "summary": "Короткий загальний висновок",
+  "top_expense_categories": ["Їжа", "Транспорт", "Кава"],
+  "risks": ["Витрати на каву зростають"],
+  "advice": ["Встановити ліміт на каву"]
+}}
+
+Операції:
+{transactions_json}
+""".strip()
+
+
+def request_financial_analysis_from_llm(
+    api_key: str,
+    model: str,
+    prompt: str,
+) -> FinancialAnalysis:
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as error:
+        raise LLMUnavailableError(
+            "google-genai is not installed. Run: pip install -r requirements.txt"
+        ) from error
+
+    client = genai.Client(api_key=api_key)
+
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=FinancialAnalysis,
+            ),
+        )
+    except Exception as error:
+        error_message = str(error)
+        normalized_error = error_message.lower()
+        status_code = getattr(error, "status_code", None)
+
+        if (
+            status_code in {429, 500, 502, 503, 504}
+            or "high demand" in normalized_error
+            or "temporarily unavailable" in normalized_error
+        ):
+            raise LLMUnavailableError("Gemini API is temporarily unavailable.") from error
+
+        if "api key" in normalized_error or status_code in {401, 403}:
+            raise LLMAuthenticationError("Gemini rejected LLM_API_KEY.") from error
+
+        if status_code == 404 or "model" in normalized_error:
+            raise LLMModelError("Gemini rejected LLM_MODEL.") from error
+
+        raise LLMUnavailableError(
+            f"LLM API request failed: {type(error).__name__}: {error}"
+        ) from error
+
+    response_text = getattr(response, "text", "").strip()
+    if not response_text:
+        raise LLMInvalidResponseError("Gemini returned an empty response.")
+
+    try:
+        return FinancialAnalysis.model_validate_json(response_text)
+    except ValidationError as error:
+        raise LLMInvalidResponseError("Gemini returned invalid analysis JSON.") from error
 
 
 @app.get("/api/transactions", include_in_schema=False)
@@ -218,6 +340,72 @@ async def delete_transaction(
         await session.commit()
 
     return {"deleted": True, "id": transaction_id}
+
+
+@app.post("/api/ai/analyze-transactions")
+@app.post("/api/ai/analyze-transactions/", include_in_schema=False)
+async def analyze_transactions(request: Request) -> dict[str, Any]:
+    sessionmaker: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
+
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(Transaction, Category)
+            .join(Category, Transaction.category_id == Category.id)
+            .order_by(Transaction.created_at.asc())
+        )
+        transactions = [
+            transaction_to_ai_payload(transaction, category)
+            for transaction, category in result.all()
+        ]
+
+    if not transactions:
+        raise HTTPException(
+            status_code=404,
+            detail="Немає транзакцій для AI-аналізу.",
+        )
+
+    llm_api_key = request.app.state.llm_api_key
+    if not llm_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="LLM_API_KEY не налаштований. Додайте ключ у .env.",
+        )
+
+    prompt = build_financial_analysis_prompt(transactions)
+
+    try:
+        analysis = await asyncio.to_thread(
+            request_financial_analysis_from_llm,
+            llm_api_key,
+            request.app.state.llm_model,
+            prompt,
+        )
+    except LLMAuthenticationError:
+        logging.warning("Gemini authentication failed")
+        raise HTTPException(
+            status_code=401,
+            detail="Gemini не прийняв LLM_API_KEY. Перевірте .env.",
+        ) from None
+    except LLMModelError:
+        logging.warning("Gemini model rejected: %s", request.app.state.llm_model)
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini не прийняв LLM_MODEL. Перевірте .env.",
+        ) from None
+    except LLMInvalidResponseError:
+        logging.warning("Gemini returned invalid financial analysis JSON")
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini повернув некоректний JSON. Спробуйте ще раз.",
+        ) from None
+    except LLMUnavailableError as error:
+        logging.warning("Gemini unavailable: %s", str(error))
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini тимчасово недоступний. Спробуйте пізніше.",
+        ) from None
+
+    return analysis.model_dump()
 
 
 @app.get("/api/summary", include_in_schema=False)

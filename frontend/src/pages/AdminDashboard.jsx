@@ -24,6 +24,12 @@ async function fetchJson(url, options = {}) {
   if (!response.ok) {
     const error = new Error("API request failed");
     error.status = response.status;
+    try {
+      const payload = await response.json();
+      error.detail = payload.detail;
+    } catch {
+      error.detail = "";
+    }
     throw error;
   }
 
@@ -135,6 +141,10 @@ function buildTransactionPayload(form) {
   return payload;
 }
 
+function normalizeTextList(value) {
+  return Array.isArray(value) ? value.filter(Boolean) : [];
+}
+
 export default function AdminDashboard() {
   const [activeView, setActiveView] = useState("overview");
   const [summary, setSummary] = useState(emptySummary);
@@ -155,6 +165,9 @@ export default function AdminDashboard() {
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [financialAnalysis, setFinancialAnalysis] = useState(null);
+  const [isAnalyzingFinances, setIsAnalyzingFinances] = useState(false);
+  const [analysisError, setAnalysisError] = useState("");
 
   const filteredTransactions =
     transactionFilter === "all"
@@ -270,6 +283,8 @@ export default function AdminDashboard() {
       });
 
       await refreshDashboardData();
+      setFinancialAnalysis(null);
+      setAnalysisError("");
       setForm(emptyForm);
       setSubmitMessage("Операцію створено");
     } catch (caughtError) {
@@ -312,11 +327,38 @@ export default function AdminDashboard() {
       });
 
       await refreshDashboardData();
+      setFinancialAnalysis(null);
+      setAnalysisError("");
       setPendingDeleteId(null);
     } catch {
       setDeleteError("Не вдалося видалити операцію");
     } finally {
       setDeletingTransactionId(null);
+    }
+  }
+
+  async function analyzeFinances() {
+    try {
+      setIsAnalyzingFinances(true);
+      setAnalysisError("");
+
+      const analysis = await fetchJson("/api/ai/analyze-transactions", {
+        method: "POST",
+      });
+
+      setFinancialAnalysis({
+        summary: analysis.summary || "",
+        top_expense_categories: normalizeTextList(analysis.top_expense_categories),
+        risks: normalizeTextList(analysis.risks),
+        advice: normalizeTextList(analysis.advice),
+      });
+    } catch (caughtError) {
+      setFinancialAnalysis(null);
+      setAnalysisError(
+        caughtError?.detail || "Не вдалося виконати AI-аналіз фінансів",
+      );
+    } finally {
+      setIsAnalyzingFinances(false);
     }
   }
 
@@ -361,6 +403,77 @@ export default function AdminDashboard() {
               <span>Баланс</span>
               <strong>{formatMoney(summary.balance)}</strong>
             </article>
+          </section>
+
+          <section className="analysis-panel" aria-label="AI-аналіз фінансів">
+            <div className="analysis-panel__header">
+              <div>
+                <h2>AI-аналіз фінансів</h2>
+                <p>Короткий висновок по транзакціях з бази даних</p>
+              </div>
+              <button
+                className="analysis-button"
+                disabled={isAnalyzingFinances || isLoading}
+                type="button"
+                onClick={analyzeFinances}
+              >
+                {isAnalyzingFinances ? "Аналіз..." : "Аналіз Фінансів"}
+              </button>
+            </div>
+
+            {analysisError ? (
+              <div className="analysis-panel__error" role="alert">
+                {analysisError}
+              </div>
+            ) : null}
+
+            {financialAnalysis ? (
+              <div className="analysis-cards">
+                <article className="analysis-card analysis-card--wide">
+                  <span>Висновок</span>
+                  <p>{financialAnalysis.summary || "Немає висновку"}</p>
+                </article>
+
+                <article className="analysis-card">
+                  <span>Топ категорії витрат</span>
+                  {financialAnalysis.top_expense_categories.length > 0 ? (
+                    <ul>
+                      {financialAnalysis.top_expense_categories.map((category) => (
+                        <li key={category}>{category}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>Немає даних</p>
+                  )}
+                </article>
+
+                <article className="analysis-card">
+                  <span>Ризики</span>
+                  {financialAnalysis.risks.length > 0 ? (
+                    <ul>
+                      {financialAnalysis.risks.map((risk) => (
+                        <li key={risk}>{risk}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>Ризиків не знайдено</p>
+                  )}
+                </article>
+
+                <article className="analysis-card analysis-card--wide">
+                  <span>Поради</span>
+                  {financialAnalysis.advice.length > 0 ? (
+                    <ul>
+                      {financialAnalysis.advice.map((advice) => (
+                        <li key={advice}>{advice}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>Немає порад</p>
+                  )}
+                </article>
+              </div>
+            ) : null}
           </section>
 
           <section className="transactions" aria-label="Операції">

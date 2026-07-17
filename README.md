@@ -11,6 +11,8 @@
 BOT_TOKEN=your_real_token_here
 DATABASE_URL=postgresql://your_database_connection_string
 ADMIN_PASSWORD=your_admin_password_here
+LLM_API_KEY=your_gemini_api_key_here
+LLM_MODEL=gemini-3.1-flash-lite
 ```
 
 3. Встанови залежності:
@@ -38,6 +40,14 @@ python -m app.main
 python -m app.check_database
 ```
 
+## Перевірка LLM API
+
+Файл `app/check_llm.py` відправляє тестовий промпт у Gemini через ключ `LLM_API_KEY` з `.env`.
+
+```bash
+python -m app.check_llm
+```
+
 ## API
 
 Запуск API:
@@ -54,6 +64,7 @@ GET /api/transactions/
 POST /api/transactions
 DELETE /api/transactions/{id}
 GET /api/summary/
+POST /api/ai/analyze-transactions
 ```
 
 POST `/api/admin/verify-password` перевіряє пароль адміністратора з `.env`.
@@ -73,6 +84,17 @@ POST `/api/transactions` приймає:
 Для створення операції потрібно передати заголовок `X-Admin-Auth`.
 
 DELETE `/api/transactions/{id}` видаляє операцію за додатним числовим `id`.
+
+POST `/api/ai/analyze-transactions` читає всі транзакції з Neon, відправляє їх у Gemini через `LLM_API_KEY` і повертає JSON:
+
+```json
+{
+  "summary": "Короткий загальний висновок",
+  "top_expense_categories": ["Їжа", "Транспорт", "Кава"],
+  "risks": ["Витрати на каву зростають"],
+  "advice": ["Встановити ліміт на каву"]
+}
+```
 
 ## Frontend
 
