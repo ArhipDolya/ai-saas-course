@@ -48,6 +48,14 @@ python -m app.check_database
 python -m app.check_llm
 ```
 
+## Перевірка токенів
+
+Файл `app/check_tokens.py` бере фінансові операції з Neon і рахує, скільки токенів займають JSON з операціями та повний AI prompt.
+
+```bash
+python -m app.check_tokens
+```
+
 ## API
 
 Запуск API:

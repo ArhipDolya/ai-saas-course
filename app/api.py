@@ -5,6 +5,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path as FilePath
 from secrets import compare_digest
 from typing import Any, AsyncIterator
 
@@ -26,6 +27,11 @@ from app.models import Category, Transaction, TransactionType, User
 ADMIN_TELEGRAM_ID = 0
 ADMIN_AUTH_HEADER = "X-Admin-Auth"
 MAX_TRANSACTION_AMOUNT = Decimal("999999999.99")
+FINANCIAL_ANALYSIS_PROMPT_PATH = (
+    FilePath(__file__).resolve().parent.parent
+    / "prompts"
+    / "financial_analysis_prompt.txt"
+)
 
 
 @asynccontextmanager
@@ -180,30 +186,9 @@ def transaction_to_ai_payload(transaction: Transaction, category: Category) -> d
 
 def build_financial_analysis_prompt(transactions: list[dict[str, str]]) -> str:
     transactions_json = json.dumps(transactions, ensure_ascii=False, indent=2)
+    prompt_template = FINANCIAL_ANALYSIS_PROMPT_PATH.read_text(encoding="utf-8")
 
-    return f"""
-Проаналізуй список фінансових операцій користувача.
-
-Завдання:
-- дай короткий загальний висновок по цих операціях;
-- визнач, на які категорії товарів або послуг було витрачено найбільше грошей;
-- знайди можливі фінансові ризики;
-- дай рівно 3 поради з фінансової грамотності;
-- відповідай українською мовою;
-- не вигадуй операції, яких немає у списку.
-
-Поверни тільки JSON без Markdown і без додаткового тексту.
-JSON має мати рівно такі поля:
-{{
-  "summary": "Короткий загальний висновок",
-  "top_expense_categories": ["Їжа", "Транспорт", "Кава"],
-  "risks": ["Витрати на каву зростають"],
-  "advice": ["Встановити ліміт на каву"]
-}}
-
-Операції:
-{transactions_json}
-""".strip()
+    return prompt_template.replace("{{transactions_json}}", transactions_json).strip()
 
 
 def request_financial_analysis_from_llm(
