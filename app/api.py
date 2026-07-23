@@ -15,6 +15,15 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.ai_chat_graph import (
+    AIChatRequest,
+    AIChatResponse,
+    ChatConfigurationError,
+    ChatLLMError,
+    FinanceChatGraph,
+    GeminiChatResponder,
+    resolve_thread_id,
+)
 from app.check_llm import DEFAULT_LLM_MODEL
 from app.database import (
     check_database_connection,
@@ -22,6 +31,7 @@ from app.database import (
     create_database_tables,
     create_sessionmaker,
 )
+from app.finance_tools import FinanceTools
 from app.models import Category, Transaction, TransactionType, User
 
 ADMIN_TELEGRAM_ID = 0
@@ -53,6 +63,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.admin_password = admin_password
     app.state.llm_api_key = os.getenv("LLM_API_KEY")
     app.state.llm_model = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
+    app.state.ai_chat_graph = FinanceChatGraph(
+        GeminiChatResponder(
+            api_key=app.state.llm_api_key,
+            model=app.state.llm_model,
+        ),
+        FinanceTools(app.state.sessionmaker),
+    )
     logging.info("API database connection OK")
 
     try:
@@ -325,6 +342,35 @@ async def delete_transaction(
         await session.commit()
 
     return {"deleted": True, "id": transaction_id}
+
+
+@app.post("/api/ai/chat", response_model=AIChatResponse)
+@app.post("/api/ai/chat/", response_model=AIChatResponse, include_in_schema=False)
+async def chat_with_ai(payload: AIChatRequest, request: Request) -> AIChatResponse:
+    thread_id = resolve_thread_id(payload.thread_id)
+    chat_graph: FinanceChatGraph = request.app.state.ai_chat_graph
+
+    try:
+        answer = await chat_graph.respond(payload.message, thread_id)
+    except ChatConfigurationError:
+        raise HTTPException(
+            status_code=503,
+            detail="AI-сервіс тимчасово недоступний. Спробуйте пізніше.",
+        ) from None
+    except ChatLLMError as error:
+        logging.warning("AI chat request failed: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="AI-сервіс тимчасово недоступний. Спробуйте пізніше.",
+        ) from None
+    except Exception as error:
+        logging.exception("Unexpected AI chat error: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=500,
+            detail="Не вдалося обробити повідомлення AI. Спробуйте ще раз.",
+        ) from None
+
+    return AIChatResponse(answer=answer, thread_id=thread_id)
 
 
 @app.post("/api/ai/analyze-transactions")

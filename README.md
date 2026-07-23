@@ -73,6 +73,7 @@ POST /api/transactions
 DELETE /api/transactions/{id}
 GET /api/summary/
 POST /api/ai/analyze-transactions
+POST /api/ai/chat
 ```
 
 POST `/api/admin/verify-password` перевіряє пароль адміністратора з `.env`.
@@ -103,6 +104,35 @@ POST `/api/ai/analyze-transactions` читає всі транзакції з Ne
   "advice": ["Встановити ліміт на каву"]
 }
 ```
+
+POST `/api/ai/chat` приймає нове повідомлення та необов'язковий `thread_id`:
+
+```json
+{
+  "message": "Привіт! Чим ти можеш допомогти?",
+  "thread_id": null
+}
+```
+
+Відповідь містить текст AI і UUID діалогу:
+
+```json
+{
+  "answer": "Коротка відповідь AI",
+  "thread_id": "uuid діалогу"
+}
+```
+
+Для локальної розробки чат зберігає короткочасну історію через LangGraph `InMemorySaver`. Пам'ять ізольована за `thread_id`, тому наступне повідомлення з тим самим ідентифікатором бачить попередню розмову та результати виконаних tools. Після restart backend пам'ять очищується.
+
+Для питань про фінансові операції AI-чат може викликати тільки read-only tools на backend:
+
+- `get_transactions_summary(period)` - доходи, витрати, баланс і кількість операцій;
+- `get_category_totals(period)` - витрати за категоріями;
+- `get_top_expenses(period, limit)` - найбільші окремі витрати;
+- `get_recent_transactions(period, limit)` - останні доходи й витрати.
+
+Підтримувані значення `period`: `current_month`, `previous_month`, `last_30_days` або місяць у форматі `YYYY-MM`. Для `limit` доступні значення від `1` до `20`. Tools не створюють, не редагують і не видаляють операції, а frontend отримує лише фінальну текстову відповідь AI.
 
 ## Frontend
 

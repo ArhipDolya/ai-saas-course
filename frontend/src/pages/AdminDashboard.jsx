@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const MAX_AMOUNT = 999999999.99;
 
@@ -145,6 +145,14 @@ function normalizeTextList(value) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
 
+function createChatMessage(role, content) {
+  return {
+    id: crypto.randomUUID(),
+    role,
+    content,
+  };
+}
+
 export default function AdminDashboard() {
   const [activeView, setActiveView] = useState("overview");
   const [summary, setSummary] = useState(emptySummary);
@@ -168,6 +176,12 @@ export default function AdminDashboard() {
   const [financialAnalysis, setFinancialAnalysis] = useState(null);
   const [isAnalyzingFinances, setIsAnalyzingFinances] = useState(false);
   const [analysisError, setAnalysisError] = useState("");
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [chatError, setChatError] = useState("");
+  const [threadId, setThreadId] = useState(null);
+  const chatRequestInFlightRef = useRef(false);
 
   const filteredTransactions =
     transactionFilter === "all"
@@ -362,6 +376,57 @@ export default function AdminDashboard() {
     }
   }
 
+  async function handleChatSubmit(event) {
+    event.preventDefault();
+
+    const message = chatInput.trim();
+    if (!message) {
+      setChatError("Введи повідомлення для AI-помічника");
+      return;
+    }
+
+    if (chatRequestInFlightRef.current) {
+      return;
+    }
+
+    chatRequestInFlightRef.current = true;
+    setChatMessages((currentMessages) => [
+      ...currentMessages,
+      createChatMessage("user", message),
+    ]);
+    setChatInput("");
+    setChatError("");
+    setIsChatLoading(true);
+
+    try {
+      const response = await fetchJson("/api/ai/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message,
+          thread_id: threadId,
+        }),
+      });
+
+      if (typeof response.answer !== "string" || typeof response.thread_id !== "string") {
+        throw new Error("Invalid AI chat response");
+      }
+
+      setThreadId(response.thread_id);
+      setChatMessages((currentMessages) => [
+        ...currentMessages,
+        createChatMessage("assistant", response.answer),
+      ]);
+    } catch {
+      setChatError("Не вдалося отримати відповідь AI. Спробуйте ще раз.");
+    } finally {
+      chatRequestInFlightRef.current = false;
+      setIsChatLoading(false);
+    }
+  }
+
   return (
     <main className="dashboard">
       <header className="dashboard__header">
@@ -474,6 +539,69 @@ export default function AdminDashboard() {
                 </article>
               </div>
             ) : null}
+          </section>
+
+          <section className="ai-chat" aria-labelledby="ai-chat-title">
+            <div className="ai-chat__header">
+              <div>
+                <h2 id="ai-chat-title">AI-помічник</h2>
+                <p>Запитайте про фінансові операції</p>
+              </div>
+            </div>
+
+            <div className="ai-chat__messages" aria-live="polite" role="log">
+              {chatMessages.length === 0 ? (
+                <p className="ai-chat__empty">Почніть діалог з AI-помічником</p>
+              ) : (
+                chatMessages.map((chatMessage) => (
+                  <article
+                    className={
+                      chatMessage.role === "user"
+                        ? "ai-chat__message ai-chat__message--user"
+                        : "ai-chat__message ai-chat__message--assistant"
+                    }
+                    key={chatMessage.id}
+                  >
+                    <span>{chatMessage.role === "user" ? "Ви" : "AI-помічник"}</span>
+                    <p>{chatMessage.content}</p>
+                  </article>
+                ))
+              )}
+
+              {isChatLoading ? (
+                <article className="ai-chat__message ai-chat__message--assistant ai-chat__message--loading">
+                  <span>AI-помічник</span>
+                  <p>Формую відповідь...</p>
+                </article>
+              ) : null}
+            </div>
+
+            {chatError ? (
+              <div className="ai-chat__error" role="alert">
+                {chatError}
+              </div>
+            ) : null}
+
+            <form className="ai-chat__form" onSubmit={handleChatSubmit}>
+              <label className="visually-hidden" htmlFor="ai-chat-input">
+                Повідомлення для AI-помічника
+              </label>
+              <textarea
+                disabled={isChatLoading}
+                id="ai-chat-input"
+                maxLength={1000}
+                placeholder="Напишіть повідомлення..."
+                rows="3"
+                value={chatInput}
+                onChange={(event) => {
+                  setChatInput(event.target.value);
+                  setChatError("");
+                }}
+              />
+              <button disabled={isChatLoading || !chatInput.trim()} type="submit">
+                {isChatLoading ? "Надсилання..." : "Надіслати"}
+              </button>
+            </form>
           </section>
 
           <section className="transactions" aria-label="Операції">
