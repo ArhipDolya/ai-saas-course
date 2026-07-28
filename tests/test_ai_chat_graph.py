@@ -9,11 +9,13 @@ from pydantic import ValidationError
 from app.ai_chat_graph import (
     AIChatRequest,
     ChatModelResponse,
+    ChatToolContext,
     ChatToolCall,
     FinanceChatGraph,
     message_text,
     resolve_thread_id,
 )
+from app.pending_actions import PENDING_ACTION_TOOL_RESULT_KEY
 
 
 class MemoryFakeResponder:
@@ -43,7 +45,13 @@ class MemoryFakeResponder:
 
 
 class UnusedTools:
-    async def execute(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        context: ChatToolContext,
+    ) -> dict[str, object]:
         raise AssertionError(f"Unexpected tool call: {name}({arguments})")
 
 
@@ -71,9 +79,61 @@ class SummaryTools:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
-    async def execute(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        context: ChatToolContext,
+    ) -> dict[str, object]:
         self.calls.append((name, arguments))
         return {"total_expense": "120.00", "transactions_count": 1}
+
+
+class PendingActionResponder:
+    async def reply(self, messages: list[BaseMessage]) -> ChatModelResponse:
+        if messages[-1].type == "human":
+            return ChatModelResponse(
+                answer="",
+                tool_calls=[
+                    ChatToolCall(
+                        id="proposal-call",
+                        name="create_transaction",
+                        arguments={
+                            "type": "expense",
+                            "amount": "450",
+                            "category": "Транспорт",
+                            "description": "Таксі",
+                            "date": "2026-07-28",
+                        },
+                    )
+                ],
+            )
+        return ChatModelResponse(
+            answer="Я підготував дію для підтвердження.",
+            tool_calls=[],
+        )
+
+
+class PendingActionTools:
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, object],
+        *,
+        context: ChatToolContext,
+    ) -> dict[str, object]:
+        self.context = context
+        return {
+            "status": "pending_confirmation",
+            PENDING_ACTION_TOOL_RESULT_KEY: {
+                "action_id": 42,
+                "thread_id": context.thread_id,
+                "action_type": "create_transaction",
+                "payload": arguments,
+                "status": "pending",
+            },
+        }
 
 
 class AIChatRequestTests(TestCase):
@@ -94,8 +154,8 @@ class AIChatMemoryTests(IsolatedAsyncioTestCase):
         thread_a_answer = await graph.respond("Який місяць ми аналізуємо?", "thread-a")
         thread_b_answer = await graph.respond("Який місяць ми аналізуємо?", "thread-b")
 
-        self.assertEqual(thread_a_answer, "Ми аналізуємо червень.")
-        self.assertEqual(thread_b_answer, "У цьому діалозі місяць не зазначено.")
+        self.assertEqual(thread_a_answer.answer, "Ми аналізуємо червень.")
+        self.assertEqual(thread_b_answer.answer, "У цьому діалозі місяць не зазначено.")
 
     async def test_graph_executes_allowed_tool_before_final_answer(self) -> None:
         tools = SummaryTools()
@@ -103,7 +163,7 @@ class AIChatMemoryTests(IsolatedAsyncioTestCase):
 
         answer = await graph.respond("Покажи витрати за місяць", "thread-a")
 
-        self.assertEqual(answer, "За поточний місяць витрати становлять 120.00.")
+        self.assertEqual(answer.answer, "За поточний місяць витрати становлять 120.00.")
         self.assertEqual(
             tools.calls,
             [("get_transactions_summary", {"period": "current_month"})],
@@ -117,3 +177,16 @@ class AIChatMemoryTests(IsolatedAsyncioTestCase):
         await graph.respond("А тепер покажи ще раз", "thread-a")
 
         self.assertEqual(len(tools.calls), 2)
+
+    async def test_graph_returns_pending_action_from_proposal_tool(self) -> None:
+        tools = PendingActionTools()
+        graph = FinanceChatGraph(PendingActionResponder(), tools)
+
+        response = await graph.respond(
+            "Додай витрату 450 грн на таксі",
+            "thread-a",
+        )
+
+        self.assertEqual(response.pending_action.action_id, 42)
+        self.assertEqual(response.pending_action.status.value, "pending")
+        self.assertEqual(tools.context.thread_id, "thread-a")

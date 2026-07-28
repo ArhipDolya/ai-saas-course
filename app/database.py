@@ -63,3 +63,18 @@ async def create_database_tables(engine: AsyncEngine) -> None:
         await connection.execute(
             text("alter table transactions add column if not exists description varchar(500)")
         )
+        await connection.execute(
+            text(
+                """
+                do $$
+                begin
+                    if exists (
+                        select 1 from pg_type where typname = 'pending_action_status'
+                    ) then
+                        alter type pending_action_status add value if not exists 'confirmed';
+                        alter type pending_action_status add value if not exists 'canceled';
+                    end if;
+                end $$;
+                """
+            )
+        )

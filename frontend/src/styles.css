@@ -305,6 +305,151 @@ body {
   white-space: pre-wrap;
 }
 
+.pending-action {
+  display: grid;
+  width: min(640px, 100%);
+  justify-self: start;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid #d6c8f6;
+  border-radius: 8px;
+  background: #fbfaff;
+}
+
+.pending-action--confirmed {
+  border-color: #b9dfc4;
+  background: #f4fbf6;
+}
+
+.pending-action--canceled {
+  border-color: #ebc9c4;
+  background: #fff7f5;
+}
+
+.pending-action__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pending-action__eyebrow {
+  display: block;
+  margin-bottom: 4px;
+  color: #5b21b6;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.pending-action__header h3 {
+  margin: 0;
+  color: #26342b;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.pending-action__status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid #d6c8f6;
+  border-radius: 8px;
+  color: #5b21b6;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.pending-action--confirmed .pending-action__status {
+  border-color: #b9dfc4;
+  color: #1f7a3a;
+}
+
+.pending-action--canceled .pending-action__status {
+  border-color: #ebc9c4;
+  color: #b83226;
+}
+
+.pending-action__details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+}
+
+.pending-action__details div {
+  min-width: 0;
+}
+
+.pending-action__details dt {
+  margin-bottom: 3px;
+  color: #5b6c61;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pending-action__details dd {
+  margin: 0;
+  color: #26342b;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.pending-action__notice,
+.pending-action__result,
+.pending-action__error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pending-action__notice {
+  color: #5b6c61;
+}
+
+.pending-action__result {
+  color: #1f7a3a;
+  font-weight: 700;
+}
+
+.pending-action--canceled .pending-action__result,
+.pending-action__error {
+  color: #b83226;
+  font-weight: 700;
+}
+
+.pending-action__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pending-action__button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.pending-action__button--confirm {
+  background: #1f7a3a;
+  color: #ffffff;
+}
+
+.pending-action__button--cancel {
+  border-color: #d9ded5;
+  background: #ffffff;
+  color: #b83226;
+}
+
+.pending-action__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .ai-chat__error {
   padding: 12px;
   border: 1px solid #f0c6c2;
@@ -638,6 +783,24 @@ body {
 
   .ai-chat__form button {
     width: 100%;
+  }
+
+  .pending-action__header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pending-action__status {
+    align-self: flex-start;
+  }
+
+  .pending-action__details {
+    grid-template-columns: 1fr;
+  }
+
+  .pending-action__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .transaction-form {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any, Protocol
@@ -16,6 +17,12 @@ from pydantic import BaseModel, Field, field_validator
 from typing_extensions import TypedDict
 
 from app.finance_tools import FinanceToolError, TOOL_SCHEMAS
+from app.pending_actions import (
+    PENDING_ACTION_TOOL_RESULT_KEY,
+    PENDING_ACTION_TOOL_SCHEMAS,
+    PendingActionResponse,
+    WRITE_ACTION_TOOL_NAMES,
+)
 
 
 MAX_CHAT_MESSAGE_LENGTH = 1_000
@@ -30,10 +37,29 @@ CHAT_SYSTEM_INSTRUCTION = """Ти AI-помічник фінансового з�
 tools: не вигадуй суми, категорії, дати чи факти. Якщо даних недостатньо або
 потрібний період неможливо визначити, прямо скажи це.
 
-Не додавай, не видаляй і не редагуй фінансові операції. Не згадуй внутрішні
-деталі реалізації, API keys, базу даних або повні технічні результати tools.
-Після отримання результату tool сформулюй для користувача готову відповідь, а
-не повідомлення про виконання tool.
+Для створення, зміни категорії, зміни суми або видалення операції ти можеш лише
+підготувати чернетку через write tool. Жоден write tool не змінює дані до окремого
+підтвердження користувача. Картка чернетки у застосунку є єдиним способом
+підтвердження: коли даних достатньо, відразу викликай write tool і не проси
+текстове «підтвердіть». Ніколи не кажи, що дію вже виконано: поясни, що чернетка
+очікує натискання кнопки в картці. Не згадуй внутрішні деталі реалізації, API keys,
+базу даних або повні технічні результати tools.
+
+Для create_transaction потрібні тип, сума й категорія. Для
+update_transaction_category, update_transaction_sum і delete_transaction потрібен
+точний transaction_id. Якщо користувач уже вказав ID, відразу викликай відповідний
+write tool. Якщо ID немає, але є дата, час, сума, категорія, тип або опис операції,
+спершу виклич find_transactions. Перетворюй дату у формат DD.MM.YYYY на YYYY-MM-DD;
+час передавай як HH:MM у часовому поясі Europe/Kyiv.
+
+Якщо find_transactions повернув рівно одну операцію, відразу виклич write tool для
+цього ID в тому самому діалозі. Не проси додаткового текстового підтвердження.
+Якщо знайдено нуль або більше однієї операції, коротко покажи варіанти й попроси
+уточнення. Не вгадуй ID і не обирай операцію серед кількох варіантів. Для
+update_transaction_sum передавай лише нову суму, а для
+update_transaction_category - лише нову категорію. Після успішного write tool
+коротко скажи, що чернетку підготовлено і її можна підтвердити або відхилити в
+картці.
 """
 
 
@@ -54,6 +80,7 @@ class AIChatRequest(BaseModel):
 class AIChatResponse(BaseModel):
     answer: str
     thread_id: str
+    pending_action: PendingActionResponse | None = None
 
 
 class ChatLLMError(Exception):
@@ -78,9 +105,22 @@ class ChatModelResponse:
     tool_calls: list[ChatToolCall]
 
 
+@dataclass(frozen=True)
+class ChatResponse:
+    answer: str
+    pending_action: PendingActionResponse | None = None
+
+
+@dataclass(frozen=True)
+class ChatToolContext:
+    thread_id: str
+
+
 class ChatState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     tool_rounds: int
+    thread_id: str
+    pending_action: dict[str, Any] | None
 
 
 class ChatResponder(Protocol):
@@ -88,7 +128,13 @@ class ChatResponder(Protocol):
 
 
 class ChatToolExecutor(Protocol):
-    async def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]: ...
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        context: ChatToolContext,
+    ) -> dict[str, Any]: ...
 
 
 def message_text(message: BaseMessage) -> str:
@@ -139,7 +185,7 @@ class GeminiChatResponder:
                                     description=tool["description"],
                                     parameters_json_schema=tool["parameters"],
                                 )
-                                for tool in TOOL_SCHEMAS
+                                for tool in (*TOOL_SCHEMAS, *PENDING_ACTION_TOOL_SCHEMAS)
                             ]
                         )
                     ],
@@ -334,14 +380,43 @@ class FinanceChatGraph:
             raise ChatLLMError("Chat graph did not return a tool call.")
 
         tool_messages: list[ToolMessage] = []
+        pending_action: dict[str, Any] | None = None
+        proposal_already_prepared = state.get("pending_action") is not None
         for tool_call in latest_message.tool_calls:
             tool_name = tool_call["name"]
             try:
-                result = await self._tools.execute(tool_name, tool_call["args"])
+                if (
+                    tool_name in WRITE_ACTION_TOOL_NAMES
+                    and proposal_already_prepared
+                ):
+                    result = {"error": "Для цього повідомлення вже є чернетка дії."}
+                else:
+                    result = await self._tools.execute(
+                        tool_name,
+                        tool_call["args"],
+                        context=ChatToolContext(thread_id=state["thread_id"]),
+                    )
             except FinanceToolError as error:
                 result = {"error": str(error)}
-            except Exception:
-                result = {"error": "Не вдалося отримати фінансові дані."}
+            except Exception as error:
+                logging.warning(
+                    "AI chat tool failed: tool_name=%s error_type=%s",
+                    tool_name,
+                    type(error).__name__,
+                )
+                result = {
+                    "error": (
+                        "Не вдалося підготувати чернетку дії."
+                        if tool_name in WRITE_ACTION_TOOL_NAMES
+                        else "Не вдалося отримати фінансові дані."
+                    )
+                }
+
+            result = dict(result)
+            proposed_action = result.pop(PENDING_ACTION_TOOL_RESULT_KEY, None)
+            if pending_action is None and isinstance(proposed_action, dict):
+                pending_action = proposed_action
+                proposal_already_prepared = True
 
             tool_messages.append(
                 ToolMessage(
@@ -351,16 +426,21 @@ class FinanceChatGraph:
                 )
             )
 
-        return {
+        update: dict[str, Any] = {
             "messages": tool_messages,
             "tool_rounds": state.get("tool_rounds", 0) + 1,
         }
+        if pending_action is not None:
+            update["pending_action"] = pending_action
+        return update
 
-    async def respond(self, message: str, thread_id: str) -> str:
+    async def respond(self, message: str, thread_id: str) -> ChatResponse:
         state = await self._graph.ainvoke(
             {
                 "messages": [HumanMessage(content=message)],
                 "tool_rounds": 0,
+                "thread_id": thread_id,
+                "pending_action": None,
             },
             config={"configurable": {"thread_id": thread_id}},
         )
@@ -372,7 +452,13 @@ class FinanceChatGraph:
         if not answer:
             raise ChatLLMError("Chat graph returned an empty answer.")
 
-        return answer
+        pending_action_data = state.get("pending_action")
+        pending_action = (
+            PendingActionResponse.model_validate(pending_action_data)
+            if pending_action_data
+            else None
+        )
+        return ChatResponse(answer=answer, pending_action=pending_action)
 
 
 def resolve_thread_id(thread_id: UUID | None) -> str:

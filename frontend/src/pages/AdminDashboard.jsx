@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
+
+import PendingActionCard from "../components/PendingActionCard.jsx";
 
 const MAX_AMOUNT = 999999999.99;
 
@@ -145,11 +147,41 @@ function normalizeTextList(value) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
 
-function createChatMessage(role, content) {
+function createChatMessage(role, content, extra = {}) {
   return {
     id: crypto.randomUUID(),
     role,
     content,
+    ...extra,
+  };
+}
+
+function normalizePendingAction(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  if (
+    !Number.isInteger(value.action_id) ||
+    value.action_id <= 0 ||
+    typeof value.thread_id !== "string" ||
+    typeof value.action_type !== "string" ||
+    !value.payload ||
+    typeof value.payload !== "object" ||
+    Array.isArray(value.payload) ||
+    value.status !== "pending"
+  ) {
+    return null;
+  }
+
+  return {
+    action_id: value.action_id,
+    thread_id: value.thread_id,
+    action_type: value.action_type,
+    payload: value.payload,
+    status: value.status,
+    error: "",
+    result: null,
   };
 }
 
@@ -182,6 +214,8 @@ export default function AdminDashboard() {
   const [chatError, setChatError] = useState("");
   const [threadId, setThreadId] = useState(null);
   const chatRequestInFlightRef = useRef(false);
+  const pendingActionRequestInFlightRef = useRef(false);
+  const [pendingActionInProgressId, setPendingActionInProgressId] = useState(null);
 
   const filteredTransactions =
     transactionFilter === "all"
@@ -417,13 +451,109 @@ export default function AdminDashboard() {
       setThreadId(response.thread_id);
       setChatMessages((currentMessages) => [
         ...currentMessages,
-        createChatMessage("assistant", response.answer),
+        createChatMessage("assistant", response.answer, {
+          pendingAction: normalizePendingAction(response.pending_action),
+        }),
       ]);
     } catch {
       setChatError("Не вдалося отримати відповідь AI. Спробуйте ще раз.");
     } finally {
       chatRequestInFlightRef.current = false;
       setIsChatLoading(false);
+    }
+  }
+
+  function updatePendingAction(chatMessageId, update) {
+    setChatMessages((currentMessages) =>
+      currentMessages.map((chatMessage) => {
+        if (chatMessage.id !== chatMessageId || !chatMessage.pendingAction) {
+          return chatMessage;
+        }
+
+        return {
+          ...chatMessage,
+          pendingAction: {
+            ...chatMessage.pendingAction,
+            ...update,
+          },
+        };
+      }),
+    );
+  }
+
+  async function handlePendingActionDecision(chatMessageId, action, decision) {
+    if (
+      action.status !== "pending" ||
+      pendingActionRequestInFlightRef.current
+    ) {
+      return;
+    }
+
+    if (!adminPassword) {
+      updatePendingAction(chatMessageId, {
+        error: "Спершу увійдіть як адміністратор на вкладці створення операції.",
+      });
+      return;
+    }
+
+    pendingActionRequestInFlightRef.current = true;
+    setPendingActionInProgressId(action.action_id);
+    updatePendingAction(chatMessageId, { error: "" });
+
+    const isConfirmation = decision === "confirm";
+    const expectedStatus = isConfirmation ? "confirmed" : "canceled";
+    const endpoint = isConfirmation ? "confirm" : "cancel";
+
+    try {
+      const response = await fetchJson(`/api/ai/actions/${action.action_id}/${endpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Admin-Auth": adminPassword,
+        },
+        body: JSON.stringify({ thread_id: action.thread_id }),
+      });
+
+      if (response.action_id !== action.action_id || response.status !== expectedStatus) {
+        throw new Error("Invalid pending action response");
+      }
+
+      updatePendingAction(chatMessageId, {
+        status: response.status,
+        result: response.result || null,
+        error: "",
+      });
+
+      if (!isConfirmation) {
+        return;
+      }
+
+      setFinancialAnalysis(null);
+      setAnalysisError("");
+
+      try {
+        await refreshDashboardData();
+        setError("");
+      } catch {
+        setError(
+          "Дію підтверджено, але не вдалося оновити дані. Оновіть сторінку.",
+        );
+      }
+    } catch (caughtError) {
+      if (caughtError?.status === 401) {
+        setAdminPassword("");
+        setIsAdminAuthenticated(false);
+        setAuthError("Пароль адміністратора недійсний. Введи його ще раз.");
+      }
+
+      updatePendingAction(chatMessageId, {
+        error: isConfirmation
+          ? "Не вдалося підтвердити дію. Спробуйте ще раз."
+          : "Не вдалося відхилити дію. Спробуйте ще раз.",
+      });
+    } finally {
+      pendingActionRequestInFlightRef.current = false;
+      setPendingActionInProgressId(null);
     }
   }
 
@@ -554,17 +684,43 @@ export default function AdminDashboard() {
                 <p className="ai-chat__empty">Почніть діалог з AI-помічником</p>
               ) : (
                 chatMessages.map((chatMessage) => (
-                  <article
-                    className={
-                      chatMessage.role === "user"
-                        ? "ai-chat__message ai-chat__message--user"
-                        : "ai-chat__message ai-chat__message--assistant"
-                    }
-                    key={chatMessage.id}
-                  >
-                    <span>{chatMessage.role === "user" ? "Ви" : "AI-помічник"}</span>
-                    <p>{chatMessage.content}</p>
-                  </article>
+                  <Fragment key={chatMessage.id}>
+                    <article
+                      className={
+                        chatMessage.role === "user"
+                          ? "ai-chat__message ai-chat__message--user"
+                          : "ai-chat__message ai-chat__message--assistant"
+                      }
+                    >
+                      <span>{chatMessage.role === "user" ? "Ви" : "AI-помічник"}</span>
+                      <p>{chatMessage.content}</p>
+                    </article>
+
+                    {chatMessage.pendingAction ? (
+                      <PendingActionCard
+                        action={chatMessage.pendingAction}
+                        isDisabled={pendingActionInProgressId !== null}
+                        isProcessing={
+                          pendingActionInProgressId === chatMessage.pendingAction.action_id
+                        }
+                        requiresAuthentication={!isAdminAuthenticated}
+                        onCancel={() =>
+                          handlePendingActionDecision(
+                            chatMessage.id,
+                            chatMessage.pendingAction,
+                            "cancel",
+                          )
+                        }
+                        onConfirm={() =>
+                          handlePendingActionDecision(
+                            chatMessage.id,
+                            chatMessage.pendingAction,
+                            "confirm",
+                          )
+                        }
+                      />
+                    ) : null}
+                  </Fragment>
                 ))
               )}
 

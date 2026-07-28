@@ -3,8 +3,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,7 +15,11 @@ from app.models import Category, Transaction, TransactionType
 
 MIN_TOOL_LIMIT = 1
 MAX_TOOL_LIMIT = 20
+MAX_TRANSACTION_AMOUNT = Decimal("999999999.99")
 PERIOD_FORMAT = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+DATE_FORMAT = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+TIME_FORMAT = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+KYIV_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
 TOOL_SCHEMAS = (
     {
@@ -85,7 +90,8 @@ TOOL_SCHEMAS = (
         "name": "get_recent_transactions",
         "description": (
             "Повертає останні доходи й витрати за вказаний період. "
-            "Використовуй для запитів про конкретні або останні операції."
+            "Використовуй для загального огляду останніх операцій. Для точного "
+            "пошуку перед зміною або видаленням використовуй find_transactions."
         ),
         "parameters": {
             "type": "object",
@@ -100,6 +106,50 @@ TOOL_SCHEMAS = (
                 "limit": {
                     "type": "integer",
                     "description": "Кількість операцій від 1 до 20.",
+                },
+            },
+            "required": ["period", "limit"],
+        },
+    },
+    {
+        "name": "find_transactions",
+        "description": (
+            "Шукає конкретні операції й повертає їхні ID. Використовуй перед "
+            "зміною суми, категорії або видаленням, коли користувач назвав "
+            "дату, час, суму, категорію чи тип, але не вказав ID. Дата й час "
+            "інтерпретуються у часовому поясі Europe/Kyiv."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "period": {
+                    "type": "string",
+                    "description": "current_month, previous_month, last_30_days або YYYY-MM.",
+                },
+                "type": {"type": "string", "enum": ["income", "expense"]},
+                "amount": {
+                    "type": "number",
+                    "description": "Точна додатна сума операції.",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Точна категорія, без урахування регістру.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Точний опис операції, без урахування регістру.",
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Дата операції у форматі YYYY-MM-DD.",
+                },
+                "time": {
+                    "type": "string",
+                    "description": "Необов'язковий точний час у форматі HH:MM.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Кількість результатів від 1 до 20.",
                 },
             },
             "required": ["period", "limit"],
@@ -132,6 +182,38 @@ class PeriodRange:
             "from": self.start.date().isoformat(),
             "to": self.end.date().isoformat(),
         }
+
+
+@dataclass(frozen=True)
+class TransactionMatch:
+    period: PeriodRange
+    limit: int
+    transaction_type: TransactionType | None
+    amount: Decimal | None
+    category: str | None
+    description: str | None
+    created_at_start: datetime | None
+    created_at_end: datetime | None
+
+    def as_json(self) -> dict[str, str]:
+        filters: dict[str, str] = {}
+        if self.transaction_type is not None:
+            filters["type"] = self.transaction_type.value
+        if self.amount is not None:
+            filters["amount"] = money(self.amount)
+        if self.category is not None:
+            filters["category"] = self.category
+        if self.description is not None:
+            filters["description"] = self.description
+        if self.created_at_start is not None:
+            filters["created_at_from"] = self.created_at_start.astimezone(
+                KYIV_TIMEZONE
+            ).isoformat()
+        if self.created_at_end is not None:
+            filters["created_at_to"] = self.created_at_end.astimezone(
+                KYIV_TIMEZONE
+            ).isoformat()
+        return filters
 
 
 def money(value: object) -> str:
@@ -215,13 +297,132 @@ def require_period(arguments: dict[str, Any]) -> PeriodRange:
     return resolve_period(arguments.get("period"))
 
 
+def require_optional_transaction_type(value: object) -> TransactionType | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidToolArgumentsError("Тип операції має бути income або expense.")
+    try:
+        return TransactionType(value)
+    except ValueError as error:
+        raise InvalidToolArgumentsError(
+            "Тип операції має бути income або expense."
+        ) from error
+
+
+def require_optional_amount(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise InvalidToolArgumentsError("Сума має бути числом.")
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise InvalidToolArgumentsError("Сума має бути числом.") from error
+
+    if not amount.is_finite() or not Decimal("0") < amount <= MAX_TRANSACTION_AMOUNT:
+        raise InvalidToolArgumentsError("Сума має бути додатною та в допустимому діапазоні.")
+    if amount != amount.quantize(Decimal("0.01")):
+        raise InvalidToolArgumentsError("Сума може мати не більше двох знаків після коми.")
+    return amount
+
+
+def require_optional_category(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidToolArgumentsError("Категорія має бути текстом.")
+    category = value.strip()
+    if not category or len(category) > 100 or not any(char.isalpha() for char in category):
+        raise InvalidToolArgumentsError("Категорія має містити текст до 100 символів.")
+    return category
+
+
+def require_optional_description(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidToolArgumentsError("Опис має бути текстом.")
+    description = value.strip()
+    if not description or len(description) > 500:
+        raise InvalidToolArgumentsError("Опис має містити від 1 до 500 символів.")
+    return description
+
+
+def resolve_match_time_range(
+    date_value: object,
+    time_value: object,
+) -> tuple[datetime | None, datetime | None]:
+    if date_value is None:
+        if time_value is not None:
+            raise InvalidToolArgumentsError("Час можна вказати лише разом з датою.")
+        return None, None
+    if not isinstance(date_value, str) or not DATE_FORMAT.fullmatch(date_value):
+        raise InvalidToolArgumentsError("Дата має бути у форматі YYYY-MM-DD.")
+    if time_value is not None and (
+        not isinstance(time_value, str) or not TIME_FORMAT.fullmatch(time_value)
+    ):
+        raise InvalidToolArgumentsError("Час має бути у форматі HH:MM.")
+
+    try:
+        value = f"{date_value} {time_value or '00:00'}"
+        local_start = datetime.strptime(value, "%Y-%m-%d %H:%M").replace(
+            tzinfo=KYIV_TIMEZONE
+        )
+    except ValueError as error:
+        raise InvalidToolArgumentsError("Дата або час операції некоректні.") from error
+
+    local_end = local_start + (timedelta(minutes=1) if time_value else timedelta(days=1))
+    return (
+        local_start.astimezone(timezone.utc),
+        local_end.astimezone(timezone.utc),
+    )
+
+
+def require_transaction_match(arguments: dict[str, Any]) -> TransactionMatch:
+    period = require_period(arguments)
+    transaction_type = require_optional_transaction_type(arguments.get("type"))
+    amount = require_optional_amount(arguments.get("amount"))
+    category = require_optional_category(arguments.get("category"))
+    description = require_optional_description(arguments.get("description"))
+    created_at_start, created_at_end = resolve_match_time_range(
+        arguments.get("date"),
+        arguments.get("time"),
+    )
+
+    if not any(
+        (transaction_type, amount is not None, category, description, created_at_start)
+    ):
+        raise InvalidToolArgumentsError(
+            "Для пошуку конкретної операції потрібен хоча б один фільтр."
+        )
+
+    return TransactionMatch(
+        period=period,
+        limit=require_limit(arguments.get("limit")),
+        transaction_type=transaction_type,
+        amount=amount,
+        category=category,
+        description=description,
+        created_at_start=created_at_start,
+        created_at_end=created_at_end,
+    )
+
+
 class FinanceTools:
     """Read-only financial queries available to the AI chat workflow."""
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         self._sessionmaker = sessionmaker
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        context: object | None = None,
+    ) -> dict[str, Any]:
+        del context
         if not isinstance(arguments, dict):
             raise InvalidToolArgumentsError("Параметри tool мають бути об'єктом.")
 
@@ -239,6 +440,8 @@ class FinanceTools:
                 require_period(arguments),
                 require_limit(arguments.get("limit")),
             )
+        if name == "find_transactions":
+            return await self.find_transactions(require_transaction_match(arguments))
 
         raise UnknownToolError("Запитаний tool недоступний.")
 
@@ -352,12 +555,62 @@ class FinanceTools:
             "transactions_count": len(rows),
         }
 
-    @staticmethod
-    def _transaction_json(transaction: Transaction, category: Category) -> dict[str, str]:
+    async def find_transactions(self, match: TransactionMatch) -> dict[str, Any]:
+        filters = [
+            Transaction.created_at >= match.period.start,
+            Transaction.created_at < match.period.end,
+        ]
+        if match.transaction_type is not None:
+            filters.append(Category.type == match.transaction_type)
+        if match.amount is not None:
+            filters.append(Transaction.amount == match.amount)
+        if match.category is not None:
+            filters.append(func.lower(Category.name) == match.category.lower())
+        if match.description is not None:
+            filters.append(
+                func.lower(func.coalesce(Transaction.description, ""))
+                == match.description.lower()
+            )
+        if match.created_at_start is not None and match.created_at_end is not None:
+            filters.extend(
+                (
+                    Transaction.created_at >= match.created_at_start,
+                    Transaction.created_at < match.created_at_end,
+                )
+            )
+
+        async with self._sessionmaker() as session:
+            result = await session.execute(
+                select(Transaction, Category)
+                .join(Category, Transaction.category_id == Category.id)
+                .where(*filters)
+                .order_by(Transaction.created_at.desc(), Transaction.id.desc())
+                .limit(match.limit)
+            )
+            rows = result.all()
+
         return {
+            "period": match.period.as_json(),
+            "filters": match.as_json(),
+            "transactions": [
+                self._transaction_json(transaction, category)
+                for transaction, category in rows
+            ],
+            "transactions_count": len(rows),
+        }
+
+    @staticmethod
+    def _transaction_json(transaction: Transaction, category: Category) -> dict[str, Any]:
+        created_at = transaction.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        return {
+            "id": transaction.id,
             "type": category.type.value,
             "amount": money(transaction.amount),
             "category": category.name,
             "description": transaction.description or "",
-            "created_at": transaction.created_at.isoformat(),
+            "created_at": created_at.astimezone(KYIV_TIMEZONE).isoformat(),
+            "timezone": "Europe/Kyiv",
         }

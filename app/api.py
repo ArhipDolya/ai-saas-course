@@ -3,15 +3,15 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path as FilePath
 from secrets import compare_digest
 from typing import Any, AsyncIterator
+from uuid import UUID
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Path, Request
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,6 +24,7 @@ from app.ai_chat_graph import (
     GeminiChatResponder,
     resolve_thread_id,
 )
+from app.chat_tools import FinanceChatToolExecutor
 from app.check_llm import DEFAULT_LLM_MODEL
 from app.database import (
     check_database_connection,
@@ -32,11 +33,22 @@ from app.database import (
     create_sessionmaker,
 )
 from app.finance_tools import FinanceTools
-from app.models import Category, Transaction, TransactionType, User
+from app.models import Category, PendingActionStatus, Transaction, User
+from app.pending_actions import (
+    PendingActionNotFoundError,
+    PendingActionPayloadError,
+    PendingActionService,
+    PendingActionStatusError,
+    PendingActionTargetNotFoundError,
+    UnsupportedPendingActionError,
+)
+from app.transaction_service import (
+    TransactionCreate,
+    create_admin_transaction,
+    transaction_to_json,
+)
 
-ADMIN_TELEGRAM_ID = 0
 ADMIN_AUTH_HEADER = "X-Admin-Auth"
-MAX_TRANSACTION_AMOUNT = Decimal("999999999.99")
 FINANCIAL_ANALYSIS_PROMPT_PATH = (
     FilePath(__file__).resolve().parent.parent
     / "prompts"
@@ -63,12 +75,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.admin_password = admin_password
     app.state.llm_api_key = os.getenv("LLM_API_KEY")
     app.state.llm_model = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
+    app.state.pending_actions = PendingActionService(app.state.sessionmaker)
     app.state.ai_chat_graph = FinanceChatGraph(
         GeminiChatResponder(
             api_key=app.state.llm_api_key,
             model=app.state.llm_model,
         ),
-        FinanceTools(app.state.sessionmaker),
+        FinanceChatToolExecutor(
+            FinanceTools(app.state.sessionmaker),
+            app.state.pending_actions,
+        ),
     )
     logging.info("API database connection OK")
 
@@ -81,60 +97,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Finance Telegram Bot API", lifespan=lifespan)
 
 
-class TransactionCreate(BaseModel):
-    type: TransactionType
-    amount: Decimal = Field(gt=Decimal("0"), le=MAX_TRANSACTION_AMOUNT)
-    category: str = Field(min_length=1, max_length=100)
-    description: str | None = Field(default=None, max_length=500)
-    date: datetime | None = None
-
-    @field_validator("amount")
-    @classmethod
-    def validate_amount(cls, value: Decimal) -> Decimal:
-        quantized = value.quantize(Decimal("0.01"))
-        if value != quantized:
-            raise ValueError("Amount can have at most 2 decimal places")
-
-        return quantized
-
-    @field_validator("category")
-    @classmethod
-    def validate_category(cls, value: str) -> str:
-        category = value.strip()
-        if not category:
-            raise ValueError("Category is required")
-
-        if not any(char.isalpha() for char in category):
-            raise ValueError("Category must contain text")
-
-        return category
-
-    @field_validator("description")
-    @classmethod
-    def validate_description(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-
-        description = value.strip()
-        return description or None
-
-    @field_validator("date")
-    @classmethod
-    def validate_date(cls, value: datetime | None) -> datetime | None:
-        if value is None:
-            return None
-
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        else:
-            value = value.astimezone(timezone.utc)
-
-        if value > datetime.now(timezone.utc):
-            raise ValueError("Date cannot be in the future")
-
-        return value
-
-
 class AdminPasswordPayload(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
@@ -144,6 +106,21 @@ class FinancialAnalysis(BaseModel):
     top_expense_categories: list[str]
     risks: list[str]
     advice: list[str]
+
+
+class PendingActionDecisionPayload(BaseModel):
+    thread_id: UUID
+
+
+class PendingActionConfirmResponse(BaseModel):
+    action_id: int
+    status: PendingActionStatus
+    result: dict[str, Any]
+
+
+class PendingActionCancelResponse(BaseModel):
+    action_id: int
+    status: PendingActionStatus
 
 
 class LLMAuthenticationError(Exception):
@@ -170,25 +147,6 @@ def require_admin_password(request: Request, password: str) -> None:
 
 def format_money(value: object) -> str:
     return str(Decimal(str(value)).quantize(Decimal("0.01")))
-
-
-def transaction_to_json(
-    transaction: Transaction,
-    category: Category,
-    user: User,
-) -> dict[str, Any]:
-    return {
-        "id": transaction.id,
-        "user_id": user.id,
-        "telegram_id": user.telegram_id,
-        "username": user.username,
-        "category_id": category.id,
-        "category_name": category.name,
-        "type": category.type.value,
-        "amount": str(transaction.amount),
-        "description": transaction.description,
-        "created_at": transaction.created_at.isoformat(),
-    }
 
 
 def transaction_to_ai_payload(transaction: Transaction, category: Category) -> dict[str, str]:
@@ -304,23 +262,8 @@ async def create_transaction(
     sessionmaker: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
 
     async with sessionmaker() as session:
-        user = await get_or_create_admin_user(session)
-        category = await get_or_create_category(
-            session=session,
-            user_id=user.id,
-            name=payload.category,
-            transaction_type=payload.type,
-        )
-        transaction = Transaction(
-            user_id=user.id,
-            category_id=category.id,
-            amount=payload.amount,
-            description=payload.description,
-            created_at=payload.date or datetime.now(timezone.utc),
-        )
-        session.add(transaction)
-        await session.commit()
-        await session.refresh(transaction)
+        async with session.begin():
+            transaction, category, user = await create_admin_transaction(session, payload)
 
         return transaction_to_json(transaction, category, user)
 
@@ -351,7 +294,7 @@ async def chat_with_ai(payload: AIChatRequest, request: Request) -> AIChatRespon
     chat_graph: FinanceChatGraph = request.app.state.ai_chat_graph
 
     try:
-        answer = await chat_graph.respond(payload.message, thread_id)
+        chat_response = await chat_graph.respond(payload.message, thread_id)
     except ChatConfigurationError:
         raise HTTPException(
             status_code=503,
@@ -370,7 +313,101 @@ async def chat_with_ai(payload: AIChatRequest, request: Request) -> AIChatRespon
             detail="Не вдалося обробити повідомлення AI. Спробуйте ще раз.",
         ) from None
 
-    return AIChatResponse(answer=answer, thread_id=thread_id)
+    return AIChatResponse(
+        answer=chat_response.answer,
+        thread_id=thread_id,
+        pending_action=chat_response.pending_action,
+    )
+
+
+@app.post(
+    "/api/ai/actions/{action_id}/confirm",
+    response_model=PendingActionConfirmResponse,
+)
+@app.post(
+    "/api/ai/actions/{action_id}/confirm/",
+    response_model=PendingActionConfirmResponse,
+    include_in_schema=False,
+)
+async def confirm_ai_action(
+    payload: PendingActionDecisionPayload,
+    request: Request,
+    action_id: int = Path(gt=0),
+    admin_password: str = Header(default="", alias=ADMIN_AUTH_HEADER),
+) -> PendingActionConfirmResponse:
+    require_admin_password(request, admin_password)
+    pending_actions: PendingActionService = request.app.state.pending_actions
+
+    try:
+        confirmed_action = await pending_actions.confirm(
+            action_id=action_id,
+            thread_id=str(payload.thread_id),
+        )
+    except PendingActionNotFoundError:
+        raise HTTPException(status_code=404, detail="Чернетку дії не знайдено.") from None
+    except PendingActionStatusError:
+        raise HTTPException(
+            status_code=409,
+            detail="Цю дію вже підтверджено або скасовано.",
+        ) from None
+    except PendingActionPayloadError:
+        raise HTTPException(
+            status_code=422,
+            detail="Payload чернетки дії некоректний.",
+        ) from None
+    except PendingActionTargetNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Операцію для цієї дії не знайдено.",
+        ) from None
+    except UnsupportedPendingActionError:
+        raise HTTPException(
+            status_code=422,
+            detail="Цей тип дії ще не підтримує підтвердження.",
+        ) from None
+
+    return PendingActionConfirmResponse(
+        action_id=confirmed_action.action.action_id,
+        status=PendingActionStatus(confirmed_action.action.status),
+        result=confirmed_action.result,
+    )
+
+
+@app.post(
+    "/api/ai/actions/{action_id}/cancel",
+    response_model=PendingActionCancelResponse,
+)
+@app.post(
+    "/api/ai/actions/{action_id}/cancel/",
+    response_model=PendingActionCancelResponse,
+    include_in_schema=False,
+)
+async def cancel_ai_action(
+    payload: PendingActionDecisionPayload,
+    request: Request,
+    action_id: int = Path(gt=0),
+    admin_password: str = Header(default="", alias=ADMIN_AUTH_HEADER),
+) -> PendingActionCancelResponse:
+    require_admin_password(request, admin_password)
+    pending_actions: PendingActionService = request.app.state.pending_actions
+
+    try:
+        action = await pending_actions.cancel(
+            action_id=action_id,
+            thread_id=str(payload.thread_id),
+        )
+    except PendingActionNotFoundError:
+        raise HTTPException(status_code=404, detail="Чернетку дії не знайдено.") from None
+    except PendingActionStatusError:
+        raise HTTPException(
+            status_code=409,
+            detail="Цю дію вже підтверджено або скасовано.",
+        ) from None
+
+    return PendingActionCancelResponse(
+        action_id=action.action_id,
+        status=PendingActionStatus(action.status),
+    )
 
 
 @app.post("/api/ai/analyze-transactions")
@@ -461,47 +498,3 @@ async def get_summary(request: Request) -> dict[str, str]:
             "total_expense": format_money(total_expense),
             "balance": format_money(balance),
         }
-
-
-async def get_or_create_admin_user(session: AsyncSession) -> User:
-    user = await session.scalar(
-        select(User).where(User.telegram_id == ADMIN_TELEGRAM_ID)
-    )
-    if user:
-        return user
-
-    user = User(
-        telegram_id=ADMIN_TELEGRAM_ID,
-        username="admin_dashboard",
-        first_name="Admin",
-        last_name="Dashboard",
-    )
-    session.add(user)
-    await session.flush()
-    return user
-
-
-async def get_or_create_category(
-    session: AsyncSession,
-    user_id: int,
-    name: str,
-    transaction_type: TransactionType,
-) -> Category:
-    category = await session.scalar(
-        select(Category).where(
-            Category.user_id == user_id,
-            Category.name == name,
-            Category.type == transaction_type,
-        )
-    )
-    if category:
-        return category
-
-    category = Category(
-        user_id=user_id,
-        name=name,
-        type=transaction_type,
-    )
-    session.add(category)
-    await session.flush()
-    return category
