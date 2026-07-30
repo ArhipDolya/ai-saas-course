@@ -19,6 +19,9 @@ MAX_TRANSACTION_AMOUNT = Decimal("999999999.99")
 PERIOD_FORMAT = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 DATE_FORMAT = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TIME_FORMAT = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+DATE_TIME_FORMAT = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})(?:,\s*|\s+)((?:[01]\d|2[0-3]):[0-5]\d)$"
+)
 KYIV_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
 TOOL_SCHEMAS = (
@@ -353,6 +356,17 @@ def resolve_match_time_range(
     date_value: object,
     time_value: object,
 ) -> tuple[datetime | None, datetime | None]:
+    if isinstance(date_value, str):
+        date_time_match = DATE_TIME_FORMAT.fullmatch(date_value.strip())
+        if date_time_match:
+            parsed_date, parsed_time = date_time_match.groups()
+            if time_value is not None and time_value != parsed_time:
+                raise InvalidToolArgumentsError(
+                    "Дата й час операції суперечать один одному."
+                )
+            date_value = parsed_date
+            time_value = parsed_time
+
     if date_value is None:
         if time_value is not None:
             raise InvalidToolArgumentsError("Час можна вказати лише разом з датою.")

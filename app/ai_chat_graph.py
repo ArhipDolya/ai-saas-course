@@ -192,6 +192,13 @@ class GeminiChatResponder:
                 ),
             )
         except Exception as error:
+            error_message = str(error).replace(self._api_key, "[redacted]")
+            logging.warning(
+                "Gemini chat request failed: error_type=%s status_code=%s detail=%s",
+                type(error).__name__,
+                getattr(error, "status_code", None),
+                error_message[:500],
+            )
             raise ChatLLMError("Gemini chat request failed.") from error
 
         tool_calls = self._response_tool_calls(response)
@@ -329,11 +336,12 @@ class FinanceChatGraph:
         workflow = StateGraph(ChatState)
         workflow.add_node("model", self._model_node)
         workflow.add_node("tools", self._tools_node)
+        workflow.add_node("tool_limit", self._tool_limit_node)
         workflow.add_edge(START, "model")
         workflow.add_conditional_edges(
             "model",
             self._route_after_model,
-            {"tools": "tools", END: END},
+            {"tools": "tools", "tool_limit": "tool_limit", END: END},
         )
         workflow.add_edge("tools", "model")
         return workflow.compile(checkpointer=self._checkpointer)
@@ -371,8 +379,26 @@ class FinanceChatGraph:
         if not isinstance(latest_message, AIMessage) or not latest_message.tool_calls:
             return END
         if state.get("tool_rounds", 0) >= MAX_TOOL_ROUNDS:
-            return END
+            return "tool_limit"
         return "tools"
+
+    @staticmethod
+    def _tool_limit_node(state: ChatState) -> dict[str, list[AIMessage]]:
+        logging.warning(
+            "AI chat tool call limit reached: thread_id=%s tool_rounds=%s",
+            state.get("thread_id"),
+            state.get("tool_rounds", 0),
+        )
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "Не вдалося однозначно визначити потрібну операцію. "
+                        "Уточніть, будь ласка, дату, час, суму або категорію."
+                    )
+                )
+            ]
+        }
 
     async def _tools_node(self, state: ChatState) -> dict[str, Any]:
         latest_message = state["messages"][-1]
@@ -397,6 +423,12 @@ class FinanceChatGraph:
                         context=ChatToolContext(thread_id=state["thread_id"]),
                     )
             except FinanceToolError as error:
+                logging.info(
+                    "AI chat tool rejected: tool_name=%s error_type=%s detail=%s",
+                    tool_name,
+                    type(error).__name__,
+                    str(error)[:300],
+                )
                 result = {"error": str(error)}
             except Exception as error:
                 logging.warning(

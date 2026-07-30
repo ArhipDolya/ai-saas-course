@@ -67,6 +67,7 @@ uvicorn app.api:app --reload
 Endpoint для майбутнього React-фронтенду:
 
 ```text
+GET /healthz
 POST /api/admin/verify-password
 GET /api/transactions/
 POST /api/transactions
@@ -164,3 +165,44 @@ docker compose up --build api frontend
 ```bash
 docker compose up --build
 ```
+
+## Deploy на Render
+
+У репозиторії є `Dockerfile.render` для production: він збирає React у першому
+етапі, після чого FastAPI віддає frontend і `/api` з одного домену. Через це
+frontend використовує відносні `/api/...` URL без окремого CORS налаштування.
+
+1. Закоміть і запуш зміни в GitHub.
+2. У Render обери `New` -> `Blueprint` та підключи репозиторій. Render прочитає
+   `render.yaml` і створить Web Service `finance-saas`.
+3. Під час створення введи секретні значення `DATABASE_URL`, `ADMIN_PASSWORD` і
+   `LLM_API_KEY`. Не додавай їх у Git або `render.yaml`.
+4. Після deploy відкрий URL сервісу. Frontend буде доступний у корені, а
+   перевірка готовності - за шляхом `/healthz`.
+
+`/healthz` виконує простий `SELECT 1` до Neon. Render вважає endpoint здоровим,
+коли він повертає `2xx`, тому у `render.yaml` для нього встановлено
+`healthCheckPath: /healthz`.
+
+Free Web Service може заснути після періоду без вхідних HTTP-запитів, тому перше
+відкриття після простою може тривати довше. AI-чат використовує `InMemorySaver`,
+отже його історія за `thread_id` очищується після restart або засинання сервісу;
+транзакції в Neon при цьому не втрачаються.
+
+### Telegram-бот на Render
+
+Не запускай polling бота в тому самому Web Service: HTTP healthcheck і Telegram
+polling мають різні життєві цикли. Для бота створи окремий `Background Worker`
+у Render з такими параметрами:
+
+```text
+Runtime: Docker
+Dockerfile Path: Dockerfile.render
+Docker Context Directory: .
+Docker Command: python -m app.main
+```
+
+Для worker задай `BOT_TOKEN` і `DATABASE_URL`. Background Worker не має
+безкоштовного плану в Render. Перед його запуском зупини локальний або інший
+запущений екземпляр бота, щоб Telegram не повернув `Conflict` через два
+одночасні `getUpdates` polling-процеси.

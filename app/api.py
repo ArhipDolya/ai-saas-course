@@ -97,6 +97,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Finance Telegram Bot API", lifespan=lifespan)
 
 
+@app.get("/healthz", include_in_schema=False)
+async def healthcheck(request: Request) -> dict[str, str]:
+    """Render readiness probe that also verifies the Neon connection."""
+
+    sessionmaker: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
+    try:
+        async with sessionmaker() as session:
+            await session.execute(select(1))
+    except Exception as error:
+        logging.warning("Health check failed: error_type=%s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="Service unavailable") from None
+
+    return {"status": "ok"}
+
+
 class AdminPasswordPayload(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
@@ -301,7 +316,12 @@ async def chat_with_ai(payload: AIChatRequest, request: Request) -> AIChatRespon
             detail="AI-сервіс тимчасово недоступний. Спробуйте пізніше.",
         ) from None
     except ChatLLMError as error:
-        logging.warning("AI chat request failed: %s", type(error).__name__)
+        logging.warning(
+            "AI chat request failed: error_type=%s reason=%s cause_type=%s",
+            type(error).__name__,
+            str(error),
+            type(error.__cause__).__name__ if error.__cause__ else None,
+        )
         raise HTTPException(
             status_code=503,
             detail="AI-сервіс тимчасово недоступний. Спробуйте пізніше.",

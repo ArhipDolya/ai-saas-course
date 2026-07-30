@@ -10,8 +10,7 @@ class SPAStaticFiles(StaticFiles):
     """Serve React files and return index.html for frontend routes."""
 
     async def get_response(self, path: str, scope):
-        # Не маскуємо неправильні API endpoint-и React-сторінкою.
-        if path.startswith("api/"):
+        if path == "api" or path.startswith("api/"):
             raise StarletteHTTPException(status_code=404)
 
         try:
@@ -20,22 +19,18 @@ class SPAStaticFiles(StaticFiles):
             if error.status_code != 404:
                 raise
 
-            # Підтримка React Router і відкриття сторінок напряму.
             return await super().get_response("index.html", scope)
 
 
-FRONTEND_DIRECTORY = (
-    Path(__file__).resolve().parent.parent / "frontend_dist"
-)
+FRONTEND_DIRECTORY = Path(__file__).resolve().parent.parent / "frontend_dist"
 
 if not FRONTEND_DIRECTORY.exists():
     raise RuntimeError(
-        "Frontend build was not found. "
-        "Build the React application before starting Render."
+        "Frontend build was not found. Build the React application before starting Render."
     )
 
 
-# Важливо: mount додається після всіх /api endpoint-ів.
+# Mount this after importing app.api so all API routes keep priority.
 app.mount(
     "/",
     SPAStaticFiles(
