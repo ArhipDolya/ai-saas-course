@@ -173,16 +173,23 @@ docker compose up --build
 frontend використовує відносні `/api/...` URL без окремого CORS налаштування.
 
 1. Закоміть і запуш зміни в GitHub.
-2. У Render обери `New` -> `Blueprint` та підключи репозиторій. Render прочитає
-   `render.yaml` і створить Web Service `finance-saas`.
-3. Під час створення введи секретні значення `DATABASE_URL`, `ADMIN_PASSWORD` і
-   `LLM_API_KEY`. Не додавай їх у Git або `render.yaml`.
-4. Після deploy відкрий URL сервісу. Frontend буде доступний у корені, а
+2. У Render обери `New` -> `Web Service` і підключи репозиторій.
+3. Вкажи такі параметри:
+
+   ```text
+   Runtime: Docker
+   Dockerfile Path: Dockerfile.render
+   Docker Context Directory: .
+   Health Check Path: /healthz
+   ```
+
+4. Під час створення введи секретні значення `DATABASE_URL`, `ADMIN_PASSWORD` і
+   `LLM_API_KEY`. Не додавай їх у Git.
+5. Після deploy відкрий URL сервісу. Frontend буде доступний у корені, а
    перевірка готовності - за шляхом `/healthz`.
 
 `/healthz` виконує простий `SELECT 1` до Neon. Render вважає endpoint здоровим,
-коли він повертає `2xx`, тому у `render.yaml` для нього встановлено
-`healthCheckPath: /healthz`.
+коли він повертає `2xx`.
 
 Free Web Service може заснути після періоду без вхідних HTTP-запитів, тому перше
 відкриття після простою може тривати довше. AI-чат використовує `InMemorySaver`,
