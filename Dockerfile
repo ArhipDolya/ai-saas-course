@@ -8,6 +8,6 @@ ENV PYTHONUNBUFFERED=1
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY . . ds, 21 . skfkns
 
 CMD ["python", "-m", "app.main"]
