@@ -80,7 +80,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
             },
             status=PendingActionStatus.pending.value,
         )
-        app.state.admin_password = "test-password"
+        app.state.admin_password = "test-password"  # pragma: allowlist secret
         app.state.pending_actions = FakePendingActionService(self.action)
         self.request = type("Request", (), {"app": app})()
         self.payload = PendingActionDecisionPayload(thread_id=THREAD_ID)
@@ -90,7 +90,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
             payload=self.payload,
             request=self.request,
             action_id=42,
-            admin_password="test-password",
+            admin_password="test-password",  # pragma: allowlist secret
         )
 
         self.assertEqual(response.action_id, 42)
@@ -103,7 +103,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
             payload=self.payload,
             request=self.request,
             action_id=42,
-            admin_password="test-password",
+            admin_password="test-password",  # pragma: allowlist secret
         )
 
         self.assertEqual(response.model_dump(), {"action_id": 42, "status": "canceled"})
@@ -114,7 +114,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
                 payload=self.payload,
                 request=self.request,
                 action_id=999,
-                admin_password="test-password",
+                admin_password="test-password",  # pragma: allowlist secret
             )
 
         self.assertEqual(context.exception.status_code, 404)
@@ -127,7 +127,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
                 payload=self.payload,
                 request=self.request,
                 action_id=42,
-                admin_password="test-password",
+                admin_password="test-password",  # pragma: allowlist secret
             )
 
         self.assertEqual(context.exception.status_code, 409)
@@ -140,7 +140,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
                 payload=self.payload,
                 request=self.request,
                 action_id=42,
-                admin_password="test-password",
+                admin_password="test-password",  # pragma: allowlist secret
             )
 
         self.assertEqual(context.exception.status_code, 422)

@@ -166,6 +166,37 @@ docker compose up --build api frontend
 docker compose up --build
 ```
 
+## Local preflight
+
+Preflight - одна команда для основних передкомітних перевірок. Він не запускає
+бота, не звертається до Neon або Gemini та не читає реальний `.env`.
+
+Одноразова підготовка:
+
+```bash
+./.venv/bin/python -m pip install -r requirements-dev.txt
+npm ci --prefix frontend
+```
+
+Запуск:
+
+```bash
+./scripts/preflight.sh
+```
+
+Порядок перевірок: Python compile -> React build -> production Docker build ->
+secret scan -> configuration.
+
+## CI та rollback
+
+Workflow [preflight.yml](.github/workflows/preflight.yml) запускає той самий
+`./scripts/preflight.sh` для pull request у `main` і для push у `main`. У GitHub
+увімкни branch protection для `main` та вимагай успішний check `Preflight` перед
+merge.
+
+Інструкція безпечного відновлення production через `git revert` знаходиться в
+[docs/rollback.md](docs/rollback.md).
+
 ## Deploy на Render
 
 У репозиторії є `Dockerfile.render` для production: він збирає React у першому
