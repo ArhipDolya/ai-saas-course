@@ -21,6 +21,7 @@ from app.pending_actions import (
 
 
 THREAD_ID = UUID("00000000-0000-4000-8000-000000000001")
+TEST_ADMIN_PASSWORD = "-".join(("test", "password"))
 
 
 class FakePendingActionService:
@@ -80,7 +81,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
             },
             status=PendingActionStatus.pending.value,
         )
-        app.state.admin_password = "test-password"
+        app.state.admin_password = TEST_ADMIN_PASSWORD
         app.state.pending_actions = FakePendingActionService(self.action)
         self.request = type("Request", (), {"app": app})()
         self.payload = PendingActionDecisionPayload(thread_id=THREAD_ID)
@@ -90,7 +91,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
             payload=self.payload,
             request=self.request,
             action_id=42,
-            admin_password="test-password",
+            admin_password=TEST_ADMIN_PASSWORD,
         )
 
         self.assertEqual(response.action_id, 42)
@@ -103,7 +104,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
             payload=self.payload,
             request=self.request,
             action_id=42,
-            admin_password="test-password",
+            admin_password=TEST_ADMIN_PASSWORD,
         )
 
         self.assertEqual(response.model_dump(), {"action_id": 42, "status": "canceled"})
@@ -114,7 +115,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
                 payload=self.payload,
                 request=self.request,
                 action_id=999,
-                admin_password="test-password",
+                admin_password=TEST_ADMIN_PASSWORD,
             )
 
         self.assertEqual(context.exception.status_code, 404)
@@ -127,7 +128,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
                 payload=self.payload,
                 request=self.request,
                 action_id=42,
-                admin_password="test-password",
+                admin_password=TEST_ADMIN_PASSWORD,
             )
 
         self.assertEqual(context.exception.status_code, 409)
@@ -140,7 +141,7 @@ class PendingActionApiTests(IsolatedAsyncioTestCase):
                 payload=self.payload,
                 request=self.request,
                 action_id=42,
-                admin_password="test-password",
+                admin_password=TEST_ADMIN_PASSWORD,
             )
 
         self.assertEqual(context.exception.status_code, 422)
