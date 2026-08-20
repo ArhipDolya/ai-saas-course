@@ -1,0 +1,14 @@
+services:
+  bot:
+    build:
+      context: .
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app
+    command:
+      - watchfiles
+      - --filter
+      - python
+      - python -m app.main
+      - app
