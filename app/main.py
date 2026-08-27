@@ -8,7 +8,6 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 from dotenv import load_dotenv
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -30,15 +29,28 @@ HELP_TEXT = (
 )
 
 
+def log_command(message: Message, command: str) -> None:
+    """Записує отриману команду без приватного вмісту повідомлення."""
+    user_id = message.from_user.id if message.from_user else None
+    logging.info(
+        "Отримано команду %s: user_id=%s, chat_id=%s",
+        command,
+        user_id,
+        message.chat.id,
+    )
+
+
 @dp.message(CommandStart())
 async def start_handler(message: Message) -> None:
     """Відповідає коротким привітанням на команду /start."""
+    log_command(message, "/start")
     await message.answer(WELCOME_TEXT)
 
 
 @dp.message(Command("help"))
 async def help_handler(message: Message) -> None:
     """Показує коротку довідку про бота та його команди."""
+    log_command(message, "/help")
     await message.answer(HELP_TEXT)
 
 
