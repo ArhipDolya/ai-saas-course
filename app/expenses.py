@@ -1,87 +1,127 @@
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from app.database import get_session_factory
-from app.models import Category, Transaction, User
-
-MAX_CATEGORY_LENGTH = 100
+from app.models import Category, Transaction, TransactionType, User
+from app.transaction_rules import (
+    MAX_AMOUNT,
+    MAX_CATEGORY_LENGTH,
+    MAX_DESCRIPTION_LENGTH,
+    today,
+)
 MONEY_DECIMAL_PLACES = 2
 
 
-class ExpenseValidationError(ValueError):
-    """Повідомляє про некоректний формат команди /expense."""
+class TransactionValidationError(ValueError):
+    """Повідомляє про некоректний формат фінансової команди."""
 
 
 @dataclass(frozen=True)
-class ExpenseData:
+class TransactionData:
     amount: Decimal
     category_name: str
+    description: str | None
+    transaction_date: date | None = None
 
 
-def parse_expense(arguments: str | None) -> ExpenseData:
-    """Перетворює аргументи /expense на валідовані суму та категорію."""
+def parse_transaction(
+    arguments: str | None,
+    *,
+    command_name: str,
+) -> TransactionData:
+    """Перетворює аргументи команди на валідовану фінансову операцію."""
+    usage = f"Використання: {command_name} <сума> <категорія> [| <опис>]"
     if not arguments:
-        raise ExpenseValidationError("Використання: /expense <сума> <категорія>")
+        raise TransactionValidationError(usage)
 
     parts = arguments.split(maxsplit=1)
     if len(parts) != 2:
-        raise ExpenseValidationError("Використання: /expense <сума> <категорія>")
+        raise TransactionValidationError(usage)
 
-    amount_raw, category_raw = parts
+    amount_raw, category_and_description = parts
     try:
         amount = Decimal(amount_raw.replace(",", "."))
     except InvalidOperation as error:
-        raise ExpenseValidationError("Сума має бути числом, наприклад 120 або 120.50.") from error
+        raise TransactionValidationError(
+            "Сума має бути числом, наприклад 120 або 120.50."
+        ) from error
 
     if not amount.is_finite() or amount <= 0:
-        raise ExpenseValidationError("Сума має бути додатним числом.")
+        raise TransactionValidationError("Сума має бути додатним числом.")
+    if amount > MAX_AMOUNT:
+        raise TransactionValidationError("Сума не може перевищувати 9 999 999 999,99 грн.")
     if amount.as_tuple().exponent < -MONEY_DECIMAL_PLACES:
-        raise ExpenseValidationError("Сума може містити не більше двох знаків після коми.")
+        raise TransactionValidationError(
+            "Сума може містити не більше двох знаків після коми."
+        )
 
+    category_raw, separator, description_raw = category_and_description.partition("|")
     category_name = " ".join(category_raw.split())
     if not category_name:
-        raise ExpenseValidationError("Вкажи категорію витрати після суми.")
+        raise TransactionValidationError("Вкажи категорію після суми.")
     if len(category_name) > MAX_CATEGORY_LENGTH:
-        raise ExpenseValidationError("Назва категорії має містити не більше 100 символів.")
+        raise TransactionValidationError(
+            "Назва категорії має містити не більше 100 символів."
+        )
 
-    return ExpenseData(amount=amount, category_name=category_name)
+    description = " ".join(description_raw.split()) if separator else None
+    if separator and not description:
+        raise TransactionValidationError("Вкажи опис після символу | або прибери його.")
+    if description and len(description) > MAX_DESCRIPTION_LENGTH:
+        raise TransactionValidationError("Опис має містити не більше 255 символів.")
+
+    return TransactionData(
+        amount=amount,
+        category_name=category_name,
+        description=description,
+    )
 
 
-async def save_expense(
+async def save_transaction(
     *,
     telegram_id: int,
-    expense: ExpenseData,
+    transaction_data: TransactionData,
+    transaction_type: TransactionType,
 ) -> Transaction:
-    """Зберігає витрату разом із користувачем і його категорією."""
+    """Зберігає дохід або витрату разом із користувачем та категорією."""
     async with get_session_factory().begin() as session:
-        user = await session.scalar(
-            select(User).where(User.telegram_id == telegram_id)
+        # The bot and API may create the same user/category concurrently.
+        user_id = await session.scalar(
+            insert(User)
+            .values(telegram_id=telegram_id)
+            .on_conflict_do_nothing(index_elements=[User.telegram_id])
+            .returning(User.id)
         )
-        if user is None:
-            user = User(telegram_id=telegram_id)
-            session.add(user)
-            await session.flush()
+        if user_id is None:
+            user_id = await session.scalar(
+                select(User.id).where(User.telegram_id == telegram_id)
+            )
 
-        category = await session.scalar(
-            select(Category).where(
-                Category.user_id == user.id,
-                Category.name == expense.category_name,
-            )
+        category_id = await session.scalar(
+            insert(Category)
+            .values(user_id=user_id, name=transaction_data.category_name)
+            .on_conflict_do_nothing(index_elements=[Category.user_id, Category.name])
+            .returning(Category.id)
         )
-        if category is None:
-            category = Category(
-                user_id=user.id,
-                name=expense.category_name,
+        if category_id is None:
+            category_id = await session.scalar(
+                select(Category.id).where(
+                    Category.user_id == user_id,
+                    Category.name == transaction_data.category_name,
+                )
             )
-            session.add(category)
-            await session.flush()
 
         transaction = Transaction(
-            user_id=user.id,
-            category_id=category.id,
-            amount=expense.amount,
+            user_id=user_id,
+            category_id=category_id,
+            amount=transaction_data.amount,
+            transaction_type=transaction_type,
+            description=transaction_data.description,
+            transaction_date=transaction_data.transaction_date or today(),
         )
         session.add(transaction)
         await session.flush()

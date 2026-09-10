@@ -12,7 +12,12 @@ from dotenv import load_dotenv
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import dispose_database, initialize_database
-from app.expenses import ExpenseValidationError, parse_expense, save_expense
+from app.expenses import (
+    TransactionValidationError,
+    parse_transaction,
+    save_transaction,
+)
+from app.models import TransactionType
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
@@ -31,8 +36,11 @@ HELP_TEXT = (
     "Це навчальний фінансовий бот. Наразі він має базові команди:\n\n"
     "/start - привітатися та розпочати роботу\n"
     "/help - переглянути цю довідку\n"
-    "/expense <сума> <категорія> - додати витрату\n\n"
-    "Приклад: /expense 120 кава"
+    "/expense <сума> <категорія> [| <опис>] - додати витрату\n"
+    "/income <сума> <категорія> [| <опис>] - додати дохід\n\n"
+    "Приклади:\n"
+    "/expense 120 кава | ранкова кава\n"
+    "/income 50000 зарплата | вереснева виплата"
 )
 
 
@@ -66,43 +74,80 @@ def format_amount(amount: Decimal) -> str:
     return f"{amount:.2f}"
 
 
-@dp.message(Command("expense"))
-async def expense_handler(message: Message, command: CommandObject) -> None:
-    """Зберігає витрату, передану як /expense <сума> <категорія>."""
-    log_command(message, "/expense")
-
+async def save_transaction_from_command(
+    message: Message,
+    command: CommandObject,
+    *,
+    command_name: str,
+    transaction_type: TransactionType,
+    transaction_label: str,
+) -> None:
     if message.from_user is None:
-        await message.answer("Не вдалося визначити користувача для цієї витрати.")
+        await message.answer("Не вдалося визначити користувача для цієї операції.")
         return
 
     try:
-        expense = parse_expense(command.args)
-    except ExpenseValidationError as error:
+        transaction_data = parse_transaction(command.args, command_name=command_name)
+    except TransactionValidationError as error:
         await message.answer(str(error))
         return
 
     try:
-        transaction = await save_expense(
+        transaction = await save_transaction(
             telegram_id=message.from_user.id,
-            expense=expense,
+            transaction_data=transaction_data,
+            transaction_type=transaction_type,
         )
     except SQLAlchemyError as error:
         logging.error(
-            "Не вдалося записати витрату: error_type=%s",
+            "Не вдалося записати операцію: command=%s, error_type=%s",
+            command_name,
             error.__class__.__name__,
         )
-        await message.answer("Не вдалося зберегти витрату. Спробуй ще раз трохи пізніше.")
+        await message.answer("Не вдалося зберегти операцію. Спробуй ще раз трохи пізніше.")
         return
 
     logging.info(
-        "Витрату записано: user_id=%s, transaction_id=%s",
+        "Операцію записано: command=%s, user_id=%s, transaction_id=%s",
+        command_name,
         message.from_user.id,
         transaction.id,
     )
     await message.answer(
-        "✅ Витрату записано:\n"
-        f"Сума: {format_amount(expense.amount)} грн\n"
-        f"Категорія: {expense.category_name}"
+        f"✅ {transaction_label} записано:\n"
+        f"Сума: {format_amount(transaction_data.amount)} грн\n"
+        f"Категорія: {transaction_data.category_name}"
+        + (
+            f"\nОпис: {transaction_data.description}"
+            if transaction_data.description
+            else ""
+        )
+    )
+
+
+@dp.message(Command("expense"))
+async def expense_handler(message: Message, command: CommandObject) -> None:
+    """Зберігає витрату, передану через команду /expense."""
+    log_command(message, "/expense")
+    await save_transaction_from_command(
+        message,
+        command,
+        command_name="/expense",
+        transaction_type=TransactionType.EXPENSE,
+        transaction_label="Витрату",
+    )
+
+
+@dp.message(Command("income"))
+async def income_handler(message: Message, command: CommandObject) -> None:
+    """Зберігає дохід, переданий через команду /income."""
+    log_command(message, "/income")
+    await save_transaction_from_command(
+        message,
+        command,
+        command_name="/income",
+        transaction_type=TransactionType.INCOME,
+        transaction_label="Дохід",
     )
 
 

@@ -4,6 +4,7 @@ import logging
 from sqlalchemy import text
 
 from app.database import dispose_database, get_engine, initialize_database
+from app.migrate_transaction_date import ADD_TRANSACTION_DATE
 
 DROP_EXTRA_COLUMNS = (
     "ALTER TABLE users "
@@ -12,8 +13,6 @@ DROP_EXTRA_COLUMNS = (
     "DROP COLUMN IF EXISTS last_name",
     "ALTER TABLE categories "
     "DROP COLUMN IF EXISTS normalized_name",
-    "ALTER TABLE transactions "
-    "DROP COLUMN IF EXISTS description",
 )
 
 MERGE_DUPLICATE_CATEGORIES = """
@@ -81,6 +80,36 @@ BEGIN
 END $$;
 """
 
+ADD_TRANSACTION_FIELDS = (
+    "ALTER TABLE transactions "
+    "ADD COLUMN IF NOT EXISTS transaction_type VARCHAR(10)",
+    "UPDATE transactions "
+    "SET transaction_type = 'expense' "
+    "WHERE transaction_type IS NULL",
+    "ALTER TABLE transactions "
+    "ALTER COLUMN transaction_type SET DEFAULT 'expense'",
+    "ALTER TABLE transactions "
+    "ALTER COLUMN transaction_type SET NOT NULL",
+    "ALTER TABLE transactions "
+    "ADD COLUMN IF NOT EXISTS description VARCHAR(255)",
+)
+
+ADD_TRANSACTION_TYPE_CONSTRAINT = """
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'transactions'::regclass
+            AND conname = 'ck_transactions_transaction_type'
+    ) THEN
+        ALTER TABLE transactions
+        ADD CONSTRAINT ck_transactions_transaction_type
+        CHECK (transaction_type IN ('expense', 'income'));
+    END IF;
+END $$;
+"""
+
 
 async def migrate_schema() -> None:
     """Приводить існуючу схему Neon до контракту трьох таблиць."""
@@ -93,6 +122,11 @@ async def migrate_schema() -> None:
         await connection.execute(text(DROP_CATEGORY_TYPE))
         await connection.execute(text(ADD_CATEGORY_UNIQUENESS))
         await connection.execute(text(CONVERT_CREATED_AT_TO_TIMESTAMP))
+        for statement in ADD_TRANSACTION_FIELDS:
+            await connection.execute(text(statement))
+        await connection.execute(text(ADD_TRANSACTION_TYPE_CONSTRAINT))
+        for statement in ADD_TRANSACTION_DATE:
+            await connection.execute(text(statement))
 
 
 async def main() -> None:
@@ -101,7 +135,7 @@ async def main() -> None:
     finally:
         await dispose_database()
 
-    logging.info("Схему бази даних приведено до контракту expense-бота.")
+    logging.info("Схему бази даних оновлено для доходів, витрат і описів.")
 
 
 if __name__ == "__main__":
