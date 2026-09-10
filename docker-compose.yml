@@ -12,3 +12,35 @@ services:
       - python
       - python -m app.main
       - app
+
+  api:
+    build:
+      context: .
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app
+    ports:
+      - "8001:8000"
+    command:
+      - uvicorn
+      - app.api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - app
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      - api
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.js:/app/vite.config.js

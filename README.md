@@ -49,6 +49,56 @@ docker compose up --build
 `requirements.txt`, `Dockerfile`, `docker-compose.yml` або `.env`, зупиніть
 поточний процес і запустіть цю саму команду ще раз.
 
+## API транзакцій
+
+Разом із Telegram-ботом Docker Compose запускає API для майбутнього
+вебзастосунку та React dashboard. Документація API буде доступна за адресою
+`http://localhost:8001/docs`.
+
+Dashboard доступний за адресою `http://localhost:5173`. Введи свій Telegram ID
+у правому верхньому куті сторінки, щоб dashboard завантажив твої дані через
+`/api/transactions` і `/api/summary`.
+
+Щоб отримати транзакції конкретного користувача, виконай запит:
+
+```text
+GET /api/transactions?telegram_id=<telegram_id>
+```
+
+Приклад відповіді:
+
+```json
+[
+  {
+    "id": 1,
+    "amount": "120.00",
+    "category": "кава",
+    "created_at": "2026-09-08T10:30:00"
+  }
+]
+```
+
+На цьому етапі `telegram_id` є тимчасовим способом визначити власника даних.
+Коли з'явиться вебавторизація, його має замінити ідентифікатор з авторизованої
+сесії.
+
+## Підсумок фінансів
+
+Ендпоінт `GET /api/summary?telegram_id=<telegram_id>` повертає суми для
+майбутнього dashboard:
+
+```json
+{
+  "total_income": "0.00",
+  "total_expense": "120.00",
+  "balance": "-120.00"
+}
+```
+
+Поточна схема зберігає лише витрати, тому `total_income` зараз завжди
+дорівнює `0.00`. Після додавання доходів ендпоінт можна буде розширити без
+зміни його JSON-контракту.
+
 ## Перевірка підключення до Neon
 
 Додайте до локального `.env` змінну `DATABASE_URL` із connection string Neon.
