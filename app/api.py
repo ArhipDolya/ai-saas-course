@@ -9,10 +9,11 @@ from pydantic import BaseModel
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.ai_analysis import GeminiAnalysisError, generate_transaction_analysis
 from app.database import dispose_database, get_session_factory, initialize_database
 from app.expenses import TransactionData, save_transaction
 from app.models import Category, Transaction, TransactionType, User
-from app.schemas import TransactionCreate
+from app.schemas import TransactionAnalysisResponse, TransactionCreate
 
 logger = logging.getLogger("uvicorn.error")
 MAX_TELEGRAM_ID = 9_223_372_036_854_775_807
@@ -153,6 +154,80 @@ async def get_transactions(
         rows = (await session.execute(statement)).mappings().all()
 
     return [TransactionResponse(**row) for row in rows]
+
+
+@app.post(
+    "/api/ai/analyze-transactions",
+    response_model=TransactionAnalysisResponse,
+)
+async def analyze_user_transactions(
+    telegram_id: int = Query(..., gt=0, le=MAX_TELEGRAM_ID, description="Telegram ID користувача"),
+) -> TransactionAnalysisResponse:
+    statement = (
+        select(
+            Transaction.transaction_type.label("type"),
+            Transaction.amount,
+            Category.name.label("category"),
+            Transaction.description,
+            Transaction.transaction_date.label("date"),
+        )
+        .join(Category, Category.id == Transaction.category_id)
+        .join(User, User.id == Transaction.user_id)
+        .where(User.telegram_id == telegram_id)
+        .order_by(
+            Transaction.transaction_date.asc(),
+            Transaction.created_at.asc(),
+            Transaction.id.asc(),
+        )
+    )
+
+    try:
+        async with get_session_factory()() as session:
+            rows = (await session.execute(statement)).mappings().all()
+    except SQLAlchemyError as error:
+        logger.error(
+            "Transaction analysis read failed: error_type=%s, sqlstate=%s",
+            type(error).__name__,
+            getattr(getattr(error, "orig", None), "sqlstate", None),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Не вдалося отримати операції для аналізу. Спробуй ще раз пізніше.",
+        ) from None
+
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Для цього користувача ще немає транзакцій для аналізу.",
+        )
+
+    transactions = [
+        {
+            "type": row["type"],
+            "amount": str(Decimal(row["amount"]).quantize(Decimal("0.01"))),
+            "category": row["category"],
+            "description": row["description"],
+            "date": row["date"].isoformat(),
+        }
+        for row in rows
+    ]
+
+    try:
+        analysis = await generate_transaction_analysis(transactions)
+    except ValueError:
+        logger.error("Gemini transaction analysis is not configured")
+        raise HTTPException(
+            status_code=503,
+            detail="AI-аналіз зараз не налаштований. Спробуй ще раз пізніше.",
+        ) from None
+    except GeminiAnalysisError:
+        raise HTTPException(
+            status_code=502,
+            detail="Не вдалося отримати коректний аналіз від Gemini. Спробуй ще раз пізніше.",
+        ) from None
+
+    logger.info("Transaction analysis completed: transactions_count=%s", len(transactions))
+    return analysis
 
 
 @app.get("/api/summary", response_model=SummaryResponse)

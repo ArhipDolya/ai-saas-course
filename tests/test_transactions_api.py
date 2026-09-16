@@ -9,18 +9,45 @@ import os
 import unittest
 from datetime import timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import httpx
 from sqlalchemy import func, make_url, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.ai_analysis import (
+    GeminiAnalysisError,
+    TRANSACTION_ANALYSIS_PROMPT,
+    build_transaction_analysis_input,
+)
 from app.api import app
 from app.expenses import TransactionData, parse_transaction, save_transaction
 from app.migrate_transaction_date import migrate_transaction_date
 from app.models import Base, Category, Transaction, TransactionType, User
+from app.schemas import TransactionAnalysisResponse
 from app.transaction_rules import today
+
+
+class TransactionAnalysisContractTests(unittest.TestCase):
+    def test_prompt_describes_project_and_exact_response_fields(self):
+        self.assertIn("Finance SaaS", TRANSACTION_ANALYSIS_PROMPT)
+        self.assertIn("Telegram-бота", TRANSACTION_ANALYSIS_PROMPT)
+        self.assertIn("одного користувача", TRANSACTION_ANALYSIS_PROMPT)
+        for field in ("summary", "top_expense_categories", "risks", "advice"):
+            self.assertIn(field, TRANSACTION_ANALYSIS_PROMPT)
+
+    def test_transaction_input_preserves_ukrainian_data_as_json(self):
+        prompt = build_transaction_analysis_input([{
+            "type": "expense",
+            "amount": "120.00",
+            "category": "кава",
+            "description": "ранкова кава",
+            "date": "2026-09-15",
+        }])
+        self.assertIn("<transactions_json>", prompt)
+        self.assertIn('"category":"кава"', prompt)
+        self.assertNotIn("\\u043a", prompt)
 
 
 @unittest.skipUnless(os.getenv("TEST_DATABASE_URL"), "Set TEST_DATABASE_URL to a disposable PostgreSQL database")
@@ -256,6 +283,58 @@ class TransactionAPITests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(sorted(response.status_code for response in responses), [204, 404])
         self.assertEqual(await self.counts(), [1, 1, 0])
+
+    async def test_ai_analysis_receives_only_selected_users_transactions(self):
+        oldest = (today() - timedelta(days=2)).isoformat()
+        await self.post({
+            "type": "expense", "amount": "120", "category": "кава", "date": oldest,
+        })
+        await self.post({
+            "type": "income", "amount": "500", "category": "зарплата",
+        })
+        await self.post(
+            {"type": "expense", "amount": "999", "category": "чужа категорія"},
+            telegram_id=202,
+        )
+        expected = TransactionAnalysisResponse(
+            summary="Баланс додатний.",
+            top_expense_categories=["кава"],
+            risks=[],
+            advice=["Продовжуй контролювати витрати."],
+        )
+        generator = AsyncMock(return_value=expected)
+
+        with patch("app.api.generate_transaction_analysis", new=generator):
+            response = await self.client.post(
+                "/api/ai/analyze-transactions?telegram_id=101"
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), expected.model_dump())
+        generator.assert_awaited_once()
+        transactions = generator.await_args.args[0]
+        self.assertEqual(len(transactions), 2)
+        self.assertEqual([row["category"] for row in transactions], ["кава", "зарплата"])
+        self.assertEqual(transactions[0]["amount"], "120.00")
+        self.assertNotIn("чужа категорія", str(transactions))
+
+    async def test_ai_analysis_empty_user_and_gemini_failure(self):
+        generator = AsyncMock()
+        with patch("app.api.generate_transaction_analysis", new=generator):
+            response = await self.client.post(
+                "/api/ai/analyze-transactions?telegram_id=404"
+            )
+        self.assertEqual(response.status_code, 404, response.text)
+        generator.assert_not_awaited()
+
+        await self.post()
+        generator = AsyncMock(side_effect=GeminiAnalysisError())
+        with patch("app.api.generate_transaction_analysis", new=generator):
+            response = await self.client.post(
+                "/api/ai/analyze-transactions?telegram_id=101"
+            )
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertNotIn("GeminiAnalysisError", response.text)
 
     async def test_migration_preserves_old_rows_and_is_repeatable(self):
         await self.post()
