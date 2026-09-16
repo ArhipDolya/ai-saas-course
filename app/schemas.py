@@ -60,3 +60,14 @@ class TransactionCreate(BaseModel):
         if value is not None and not MIN_TRANSACTION_DATE <= value <= today():
             raise ValueError("Дата має бути від 01.01.2000 до сьогодні (Europe/Kyiv).")
         return value
+
+
+class TransactionAnalysisResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(description="Короткий загальний висновок")
+    top_expense_categories: list[str] = Field(
+        description="До трьох категорій з найбільшими сумарними витратами"
+    )
+    risks: list[str] = Field(description="Фінансові ризики, підтверджені транзакціями")
+    advice: list[str] = Field(description="Конкретні поради користувачу")

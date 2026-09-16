@@ -178,6 +178,32 @@ DELETE /api/transactions/{id}?telegram_id=<telegram_id>
 `total_income` підсумовує операції `income`, `total_expense` - `expense`,
 а `balance` дорівнює різниці доходів і витрат для обраного користувача.
 
+## AI-аналіз транзакцій
+
+Кнопка «Провести аналіз транзакцій» надсилає запит:
+
+```text
+POST /api/ai/analyze-transactions?telegram_id=<telegram_id>
+```
+
+API вибирає з Neon усі доходи й витрати лише вказаного користувача, передає їх
+до Gemini та перевіряє структуровану відповідь перед поверненням на frontend:
+
+```json
+{
+  "summary": "Короткий загальний висновок",
+  "top_expense_categories": ["Їжа", "Транспорт", "Кава"],
+  "risks": ["Витрати на каву зростають"],
+  "advice": ["Встановити ліміт на каву"]
+}
+```
+
+Промпт у `app/ai_analysis.py` описує Finance SaaS, сценарій його використання,
+правила аналізу та точний формат результату. `GEMINI_API_KEY` читається тільки
+зі змінної середовища. Якщо в користувача немає транзакцій, API повертає `404`;
+помилка читання Neon повертає `503`, а помилка або невалідна відповідь Gemini -
+`502`.
+
 ## Перевірка підключення до Neon
 
 Додайте до локального `.env` змінну `DATABASE_URL` із connection string Neon.
@@ -190,6 +216,17 @@ SQLAlchemy та драйвер `psycopg` 3, виконує `SELECT 1` і зав�
 
 ```bash
 docker compose build && docker compose run --rm --no-deps bot python -m app.check_connection_to_db
+```
+
+## Перевірка Gemini API key
+
+Додайте до локального `.env` змінну `GEMINI_API_KEY`. Скрипт
+`app/check_gemini_api_key.py` робить мінімальний запит до Gemini API, перевіряє,
+що ключ приймається API, і що доступна хоча б одна модель для `generateContent`.
+Секретне значення ключа в логах не друкується.
+
+```bash
+docker compose run --rm --no-deps bot python -m app.check_gemini_api_key
 ```
 
 ## Додавання фінансової операції

@@ -131,7 +131,11 @@ function App() {
   const [deleteMessage, setDeleteMessage] = useState('')
   const [deleteError, setDeleteError] = useState('')
   const deleteInProgress = useRef(false)
-  const isMutating = isSaving || deletingId !== null
+  const [analysis, setAnalysis] = useState(null)
+  const [analysisError, setAnalysisError] = useState('')
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const analysisInProgress = useRef(false)
+  const isMutating = isSaving || deletingId !== null || isAnalyzing
 
   useEffect(() => {
     if (!telegramId) {
@@ -205,7 +209,7 @@ function App() {
 
   function handleSubmit(event) {
     event.preventDefault()
-    if (saveInProgress.current || deleteInProgress.current) return
+    if (saveInProgress.current || deleteInProgress.current || analysisInProgress.current) return
     const nextTelegramId = inputTelegramId.trim()
 
     if (!/^\d+$/.test(nextTelegramId) || BigInt(nextTelegramId) <= 0n || BigInt(nextTelegramId) > 9223372036854775807n) {
@@ -221,13 +225,17 @@ function App() {
     setDeleteCandidateId(null)
     setDeleteMessage('')
     setDeleteError('')
+    setAnalysis(null)
+    setAnalysisError('')
     setTelegramId(nextTelegramId)
     setReloadVersion((currentVersion) => currentVersion + 1)
   }
 
   function handleRefresh() {
-    if (saveInProgress.current || deleteInProgress.current) return
+    if (saveInProgress.current || deleteInProgress.current || analysisInProgress.current) return
     if (telegramId) {
+      setAnalysis(null)
+      setAnalysisError('')
       setReloadVersion((currentVersion) => currentVersion + 1)
     }
   }
@@ -258,7 +266,7 @@ function App() {
 
   async function handleTransactionSave(event) {
     event.preventDefault()
-    if (saveInProgress.current || deleteInProgress.current) return
+    if (saveInProgress.current || deleteInProgress.current || analysisInProgress.current) return
 
     setFormError('')
     setFormMessage('')
@@ -318,6 +326,8 @@ function App() {
 
       setTransactionForm(EMPTY_TRANSACTION_FORM)
       setFormMessage(`Операцію №${result.id} збережено.`)
+      setAnalysis(null)
+      setAnalysisError('')
       setReloadVersion((currentVersion) => currentVersion + 1)
     } catch {
       setFormError('Не отримано підтвердження збереження. Онови список операцій перед повторною спробою, щоб уникнути дублювання.')
@@ -336,14 +346,20 @@ function App() {
   }
 
   function requestTransactionDelete(id) {
-    if (saveInProgress.current || deleteInProgress.current) return
+    if (saveInProgress.current || deleteInProgress.current || analysisInProgress.current) return
     setDeleteCandidateId(id)
     setDeleteError('')
     setDeleteMessage('')
   }
 
   async function handleTransactionDelete(id) {
-    if (saveInProgress.current || deleteInProgress.current || !telegramId || deleteCandidateId !== id) return
+    if (
+      saveInProgress.current
+      || deleteInProgress.current
+      || analysisInProgress.current
+      || !telegramId
+      || deleteCandidateId !== id
+    ) return
 
     deleteInProgress.current = true
     setDeletingId(id)
@@ -360,6 +376,8 @@ function App() {
         setTransactions((currentTransactions) => currentTransactions.filter((row) => row.id !== id))
         setDeleteCandidateId(null)
         setDeleteMessage('Операцію видалено.')
+        setAnalysis(null)
+        setAnalysisError('')
         setReloadVersion((currentVersion) => currentVersion + 1)
       } else if (response.status === 404) {
         setDeleteCandidateId(null)
@@ -376,6 +394,43 @@ function App() {
     } finally {
       deleteInProgress.current = false
       setDeletingId(null)
+    }
+  }
+
+  async function handleTransactionAnalysis() {
+    if (
+      analysisInProgress.current
+      || saveInProgress.current
+      || deleteInProgress.current
+      || !telegramId
+    ) return
+
+    analysisInProgress.current = true
+    setIsAnalyzing(true)
+    setAnalysisError('')
+
+    try {
+      const query = new URLSearchParams({ telegram_id: telegramId })
+      const response = await fetch(`/api/ai/analyze-transactions?${query}`, {
+        method: 'POST',
+      })
+      const result = await response.json().catch(() => null)
+
+      if (!response.ok) {
+        setAnalysis(null)
+        setAnalysisError(typeof result?.detail === 'string'
+          ? result.detail
+          : 'Не вдалося провести аналіз транзакцій. Спробуй ще раз пізніше.')
+        return
+      }
+
+      setAnalysis(result)
+    } catch {
+      setAnalysis(null)
+      setAnalysisError('Не вдалося зв’язатися з API для аналізу транзакцій.')
+    } finally {
+      analysisInProgress.current = false
+      setIsAnalyzing(false)
     }
   }
 
@@ -592,6 +647,66 @@ function App() {
             </strong>
             <span className="card-footnote">Доходи мінус витрати</span>
           </article>
+        </section>
+
+        <section className="analysis-panel" aria-labelledby="analysis-title" aria-busy={isAnalyzing}>
+          <div className="analysis-heading">
+            <div>
+              <p className="eyebrow">Gemini AI</p>
+              <h2 id="analysis-title">Аналіз транзакцій</h2>
+              <p className="analysis-description">
+                Отримай короткий фінансовий висновок, ризики та практичні поради за всіма своїми операціями.
+              </p>
+            </div>
+            <button
+              className="analysis-button"
+              type="button"
+              onClick={handleTransactionAnalysis}
+              disabled={!telegramId || transactions.length === 0 || status !== 'ready' || isMutating}
+            >
+              {isAnalyzing && <span className="analysis-spinner" aria-hidden="true" />}
+              {isAnalyzing ? 'Аналізуємо операції...' : 'Проаналізувати операції'}
+            </button>
+          </div>
+
+          {analysisError && <p className="notice notice-error analysis-notice" role="alert">{analysisError}</p>}
+
+          {analysis && (
+            <div className="analysis-result" role="status">
+              <div className="analysis-grid">
+                <article className="analysis-card summary-analysis-card">
+                  <span className="analysis-label">Загальний висновок</span>
+                  <p>{analysis.summary}</p>
+                </article>
+                <article className="analysis-card categories-analysis-card">
+                  <span className="analysis-label">Найбільші категорії витрат</span>
+                  {analysis.top_expense_categories.length > 0 ? (
+                    <ol>
+                      {analysis.top_expense_categories.map((category, index) => (
+                        <li key={`${category}-${index}`}>{category}</li>
+                      ))}
+                    </ol>
+                  ) : <p>Недостатньо даних.</p>}
+                </article>
+                <article className="analysis-card risk-card">
+                  <span className="analysis-label">Ризики</span>
+                  {analysis.risks.length > 0 ? (
+                    <ul>
+                      {analysis.risks.map((risk, index) => <li key={`${risk}-${index}`}>{risk}</li>)}
+                    </ul>
+                  ) : <p>Помітних ризиків не виявлено.</p>}
+                </article>
+                <article className="analysis-card advice-card">
+                  <span className="analysis-label">Поради</span>
+                  {analysis.advice.length > 0 ? (
+                    <ul>
+                      {analysis.advice.map((advice, index) => <li key={`${advice}-${index}`}>{advice}</li>)}
+                    </ul>
+                  ) : <p>Наразі немає додаткових порад.</p>}
+                </article>
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="content-grid">
