@@ -10,10 +10,11 @@ from sqlalchemy import case, delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.ai_analysis import GeminiAnalysisError, generate_transaction_analysis
+from app.ai_chat import GeminiChatError, generate_chat_response
 from app.database import dispose_database, get_session_factory, initialize_database
 from app.expenses import TransactionData, save_transaction
 from app.models import Category, Transaction, TransactionType, User
-from app.schemas import TransactionAnalysisResponse, TransactionCreate
+from app.schemas import ChatRequest, ChatResponse, TransactionAnalysisResponse, TransactionCreate
 
 logger = logging.getLogger("uvicorn.error")
 MAX_TELEGRAM_ID = 9_223_372_036_854_775_807
@@ -269,3 +270,30 @@ async def get_summary(
         total_expense=total_expense,
         balance=total_income - total_expense,
     )
+
+
+@app.post("/api/ai/chat", response_model=ChatResponse)
+async def ai_chat(
+    payload: ChatRequest,
+    telegram_id: int = Query(..., gt=0, le=MAX_TELEGRAM_ID, description="Telegram ID користувача"),
+) -> ChatResponse:
+    try:
+        response_text = await generate_chat_response(
+            thread_id=payload.thread_id,
+            user_message=payload.message,
+            telegram_id=telegram_id,
+        )
+    except ValueError:
+        logger.error("Gemini chat is not configured")
+        raise HTTPException(
+            status_code=503,
+            detail="AI-чат зараз не налаштований. Спробуй ще раз пізніше.",
+        ) from None
+    except GeminiChatError:
+        raise HTTPException(
+            status_code=502,
+            detail="Не вдалося отримати відповідь від AI. Спробуй ще раз пізніше.",
+        ) from None
+
+    logger.info("Chat response sent: thread_id=%s", payload.thread_id)
+    return ChatResponse(message=response_text, thread_id=payload.thread_id)

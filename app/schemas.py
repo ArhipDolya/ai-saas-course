@@ -71,3 +71,15 @@ class TransactionAnalysisResponse(BaseModel):
     )
     risks: list[str] = Field(description="Фінансові ризики, підтверджені транзакціями")
     advice: list[str] = Field(description="Конкретні поради користувачу")
+
+
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=200, description="Повідомлення від користувача")
+    thread_id: str = Field(min_length=1, max_length=100, description="Ідентифікатор чату")
+
+
+class ChatResponse(BaseModel):
+    message: str = Field(description="Відповідь AI-асистента")
+    thread_id: str = Field(description="Ідентифікатор чату")

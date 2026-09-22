@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import AiChat from './AiChat'
 import './App.css'
 
 const EMPTY_SUMMARY = {
@@ -866,6 +867,8 @@ function App() {
           </article>
         </section>
       </section>
+
+      <AiChat telegramId={telegramId} isReady={status === 'ready'} />
     </main>
   )
 }
