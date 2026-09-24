@@ -25,7 +25,6 @@ function AiChat({ telegramId, isReady }) {
   const messagesEndRef = useRef(null)
   const threadIdRef = useRef('')
 
-  // Ініціалізуємо або відновлюємо thread_id при зміні користувача
   useEffect(() => {
     if (!telegramId) {
       threadIdRef.current = ''
@@ -47,7 +46,6 @@ function AiChat({ telegramId, isReady }) {
     setInputValue('')
   }, [telegramId])
 
-  // Автоскрол до останнього повідомлення
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
@@ -85,7 +83,7 @@ function AiChat({ telegramId, isReady }) {
         return
       }
 
-      setMessages((prev) => [...prev, { role: 'assistant', text: result.message }])
+      setMessages((prev) => [...prev, { role: 'assistant', text: result.message, pendingAction: result.pending_action }])
     } catch {
       setError('Не вдалося зв\u2019язатися з сервером. Перевір підключення.')
     } finally {
@@ -93,6 +91,47 @@ function AiChat({ telegramId, isReady }) {
       setIsSending(false)
     }
   }, [inputValue, telegramId])
+
+  const handleAction = useCallback(async (actionId, isConfirm, messageIndex) => {
+    if (sendingRef.current) return
+    sendingRef.current = true
+    setIsSending(true)
+    setError('')
+
+    try {
+      const endpoint = isConfirm ? 'confirm' : 'cancel'
+      const query = new URLSearchParams({ telegram_id: telegramId })
+      const response = await fetch(`/api/ai/actions/${actionId}/${endpoint}?${query}`, {
+        method: 'POST',
+      })
+
+      if (!response.ok) {
+        const result = await response.json().catch(() => null)
+        setError(result?.detail || 'Не вдалося виконати дію.')
+        return
+      }
+
+      setMessages(prev => prev.map((msg, idx) => {
+        if (idx === messageIndex) {
+          return { ...msg, pendingAction: null }
+        }
+        return msg
+      }))
+
+      const successMsg = { role: 'assistant', text: isConfirm ? '✅ Дію успішно виконано!' : '❌ Дію скасовано.' }
+      setMessages(prev => [...prev, successMsg])
+
+      if (isConfirm) {
+        window.dispatchEvent(new CustomEvent('transaction-updated'))
+      }
+
+    } catch {
+      setError('Помилка з\'єднання з сервером.')
+    } finally {
+      sendingRef.current = false
+      setIsSending(false)
+    }
+  }, [telegramId])
 
   function handleKeyDown(event) {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -102,6 +141,13 @@ function AiChat({ telegramId, isReady }) {
   }
 
   if (!telegramId || !isReady) return null
+
+  const getActionTitle = (type) => {
+    if (type === 'create_transaction') return 'Створення транзакції'
+    if (type === 'update_transaction') return 'Оновлення транзакції'
+    if (type === 'delete_transaction') return 'Видалення транзакції'
+    return 'Невідома дія'
+  }
 
   return (
     <>
@@ -148,6 +194,23 @@ function AiChat({ telegramId, isReady }) {
                   {msg.role === 'user' ? 'Ти' : 'AI'}
                 </span>
                 <p>{msg.text}</p>
+                
+                {msg.pendingAction && (
+                  <div className="pending-action-card">
+                    <h4>Підтвердження дії</h4>
+                    <p><strong>Тип:</strong> {getActionTitle(msg.pendingAction.type)}</p>
+                    {msg.pendingAction.payload.amount && (
+                      <p><strong>Сума:</strong> {msg.pendingAction.payload.amount} грн</p>
+                    )}
+                    {msg.pendingAction.payload.category && (
+                      <p><strong>Категорія:</strong> {msg.pendingAction.payload.category}</p>
+                    )}
+                    <div className="pending-action-buttons">
+                      <button onClick={() => handleAction(msg.pendingAction.action_id, true, index)} className="confirm-btn">Підтвердити</button>
+                      <button onClick={() => handleAction(msg.pendingAction.action_id, false, index)} className="cancel-btn">Скасувати</button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
 
@@ -200,4 +263,3 @@ function AiChat({ telegramId, isReady }) {
 }
 
 export default AiChat
-

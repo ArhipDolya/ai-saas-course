@@ -278,7 +278,7 @@ async def ai_chat(
     telegram_id: int = Query(..., gt=0, le=MAX_TELEGRAM_ID, description="Telegram ID користувача"),
 ) -> ChatResponse:
     try:
-        response_text = await generate_chat_response(
+        response_text, pending_action_data = await generate_chat_response(
             thread_id=payload.thread_id,
             user_message=payload.message,
             telegram_id=telegram_id,
@@ -295,5 +295,116 @@ async def ai_chat(
             detail="Не вдалося отримати відповідь від AI. Спробуй ще раз пізніше.",
         ) from None
 
-    logger.info("Chat response sent: thread_id=%s", payload.thread_id)
-    return ChatResponse(message=response_text, thread_id=payload.thread_id)
+    logger.info("Chat response sent: thread_id=%s, has_action=%s", payload.thread_id, bool(pending_action_data))
+    return ChatResponse(
+        message=response_text, 
+        thread_id=payload.thread_id,
+        pending_action=pending_action_data
+    )
+
+from app.ai_actions import get_pending_action, confirm_pending_action, cancel_pending_action
+from app.models import Transaction, Category, User, TransactionType
+from pydantic import ValidationError
+from app.schemas import TransactionCreate
+from datetime import datetime
+
+@app.post("/api/ai/actions/{action_id}/confirm")
+async def confirm_ai_action(
+    action_id: str,
+    telegram_id: int = Query(..., gt=0, le=MAX_TELEGRAM_ID),
+):
+    action = get_pending_action(action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail="Дію не знайдено.")
+    if action["telegram_id"] != telegram_id:
+        raise HTTPException(status_code=403, detail="Дія належить іншому користувачу.")
+    if action["status"] != "pending":
+        raise HTTPException(status_code=400, detail=f"Дію вже оброблено (статус: {action['status']}).")
+
+    action_type = action["type"]
+    payload = action["payload"]
+
+    try:
+        async with get_session_factory()() as session:
+            user_result = await session.execute(select(User.id).where(User.telegram_id == telegram_id))
+            user_id = user_result.scalar_one_or_none()
+            if not user_id:
+                raise HTTPException(status_code=404, detail="Користувача не знайдено.")
+
+            if action_type in ("create_transaction", "update_transaction"):
+                try:
+                    valid_payload = TransactionCreate(**payload)
+                except ValidationError as e:
+                    raise HTTPException(status_code=400, detail=f"Невалідна структура даних: {e}")
+
+                cat_result = await session.execute(
+                    select(Category.id).where(Category.user_id == user_id, Category.name == valid_payload.category)
+                )
+                category_id = cat_result.scalar_one_or_none()
+                if not category_id:
+                    new_category = Category(user_id=user_id, name=valid_payload.category)
+                    session.add(new_category)
+                    await session.flush()
+                    category_id = new_category.id
+
+                if action_type == "create_transaction":
+                    transaction = Transaction(
+                        user_id=user_id,
+                        category_id=category_id,
+                        amount=valid_payload.amount,
+                        transaction_type=valid_payload.type,
+                        description=valid_payload.description,
+                        transaction_date=valid_payload.date
+                    )
+                    session.add(transaction)
+                else: # update
+                    trans_id = payload.get("transaction_id")
+                    result = await session.execute(
+                        select(Transaction).where(Transaction.id == trans_id, Transaction.user_id == user_id)
+                    )
+                    transaction = result.scalar_one_or_none()
+                    if not transaction:
+                        raise HTTPException(status_code=404, detail="Транзакцію для оновлення не знайдено.")
+                    
+                    transaction.category_id = category_id
+                    transaction.amount = valid_payload.amount
+                    transaction.transaction_type = valid_payload.type
+                    transaction.description = valid_payload.description
+                    transaction.transaction_date = valid_payload.date
+
+            elif action_type == "delete_transaction":
+                trans_id = payload.get("transaction_id")
+                result = await session.execute(
+                    select(Transaction).where(Transaction.id == trans_id, Transaction.user_id == user_id)
+                )
+                transaction = result.scalar_one_or_none()
+                if not transaction:
+                    raise HTTPException(status_code=404, detail="Транзакцію не знайдено.")
+                await session.delete(transaction)
+
+            await session.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to confirm action {action_id}: {e}")
+        raise HTTPException(status_code=500, detail="Помилка при виконанні дії.")
+
+    confirm_pending_action(action_id)
+    return {"message": "Дію успішно виконано."}
+
+
+@app.post("/api/ai/actions/{action_id}/cancel")
+async def cancel_ai_action(
+    action_id: str,
+    telegram_id: int = Query(..., gt=0, le=MAX_TELEGRAM_ID),
+):
+    action = get_pending_action(action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail="Дію не знайдено.")
+    if action["telegram_id"] != telegram_id:
+        raise HTTPException(status_code=403, detail="Дія належить іншому користувачу.")
+    if action["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Дію вже оброблено.")
+
+    cancel_pending_action(action_id)
+    return {"message": "Дію скасовано."}

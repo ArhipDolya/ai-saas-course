@@ -248,3 +248,59 @@
   background: var(--mint-bright);
 }
 
+.pending-action-card {
+  margin-top: 12px;
+  padding: 12px;
+  background-color: var(--surface-default);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.pending-action-card h4 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pending-action-card p {
+  margin: 4px 0 !important;
+  font-size: 13px;
+}
+
+.pending-action-buttons {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+.pending-action-buttons button {
+  flex: 1;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.confirm-btn {
+  background-color: var(--primary-base);
+  color: var(--white);
+}
+
+.confirm-btn:hover {
+  background-color: var(--primary-hover);
+}
+
+.cancel-btn {
+  background-color: var(--surface-hover);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default) !important;
+}
+
+.cancel-btn:hover {
+  background-color: var(--surface-active);
+}
