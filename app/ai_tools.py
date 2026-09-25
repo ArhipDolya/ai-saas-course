@@ -1,68 +1,14 @@
 import json
+from datetime import date
 from decimal import Decimal
 
 from langchain_core.runnables.config import RunnableConfig
 from langchain_core.tools import tool
 from sqlalchemy import case, desc, func, select
 
+from app.ai_actions import ActionType, create_pending_action
 from app.database import get_session_factory
 from app.models import Category, Transaction, TransactionType, User
-from app.ai_actions import create_pending_action
-
-
-@tool
-async def prepare_create_transaction(amount: float, category: str, transaction_type: str, date: str, description: str, config: RunnableConfig) -> str:
-    """Створює запит (pending action) на додавання нової транзакції.
-    
-    Args:
-        amount: Сума (більше 0).
-        category: Назва категорії.
-        transaction_type: 'expense' (витрата) або 'income' (дохід).
-        date: Дата у форматі 'YYYY-MM-DD'.
-        description: Опис (може бути порожнім).
-    """
-    telegram_id = config.get("configurable", {}).get("telegram_id")
-    action_id = create_pending_action(telegram_id, "create_transaction", {
-        "amount": amount,
-        "category": category,
-        "type": transaction_type,
-        "date": date,
-        "description": description or ""
-    })
-    return json.dumps({"status": "pending_confirmation", "action_id": action_id, "message": "Розкажи користувачу, що ти підготував цю транзакцію, і попроси підтвердити."})
-
-
-@tool
-async def prepare_update_transaction(transaction_id: int, amount: float, category: str, transaction_type: str, date: str, description: str, config: RunnableConfig) -> str:
-    """Створює запит на оновлення існуючої транзакції.
-    
-    Args:
-        transaction_id: ID транзакції, яку треба оновити.
-        amount: Нова сума (більше 0).
-        category: Нова назва категорії.
-        transaction_type: 'expense' (витрата) або 'income' (дохід).
-        date: Нова дата у форматі 'YYYY-MM-DD'.
-        description: Новий опис.
-    """
-    telegram_id = config.get("configurable", {}).get("telegram_id")
-    action_id = create_pending_action(telegram_id, "update_transaction", {
-        "transaction_id": transaction_id,
-        "amount": amount,
-        "category": category,
-        "type": transaction_type,
-        "date": date,
-        "description": description or ""
-    })
-    return json.dumps({"status": "pending_confirmation", "action_id": action_id, "message": "Розкажи користувачу, що ти підготував оновлення транзакції, і попроси підтвердити."})
-
-
-@tool
-async def prepare_delete_transaction(transaction_id: int, config: RunnableConfig) -> str:
-    """Створює запит на видалення транзакції за її ID. Очікує підтвердження юзера."""
-    telegram_id = config.get("configurable", {}).get("telegram_id")
-    action_id = create_pending_action(telegram_id, "delete_transaction", {"transaction_id": transaction_id})
-    return json.dumps({"status": "pending_confirmation", "action_id": action_id, "message": "Попроси користувача підтвердити видалення транзакції."})
-
 
 
 @tool
@@ -216,4 +162,121 @@ async def get_top_expenses(period: str, limit: int, config: RunnableConfig) -> s
         })
 
     return json.dumps(results, ensure_ascii=False)
+
+
+@tool
+async def prepare_create_transaction(
+    transaction_type: str,
+    amount: float,
+    category: str,
+    description: str,
+    transaction_date: str,
+    config: RunnableConfig,
+) -> str:
+    """Створює PENDING-запит на додавання нової транзакції. Транзакція НЕ буде створена одразу - користувач повинен підтвердити дію.
+
+    Args:
+        transaction_type: Тип транзакції: 'expense' для витрати або 'income' для доходу.
+        amount: Сума транзакції у гривнях (наприклад, 450.00).
+        category: Назва категорії (наприклад, 'Таксі', 'Їжа', 'Зарплата').
+        description: Короткий опис транзакції (наприклад, 'Поїздка на роботу').
+        transaction_date: Дата транзакції у форматі 'YYYY-MM-DD'.
+    """
+    telegram_id = config.get("configurable", {}).get("telegram_id")
+    if not telegram_id:
+        return json.dumps({"error": "telegram_id не знайдено в контексті"})
+
+    payload = {
+        "transaction_type": transaction_type,
+        "amount": amount,
+        "category": category,
+        "description": description,
+        "transaction_date": transaction_date,
+    }
+
+    action = create_pending_action(
+        action_type=ActionType.CREATE_TRANSACTION,
+        telegram_id=telegram_id,
+        payload=payload,
+    )
+
+    return json.dumps({
+        "status": "pending_confirmation",
+        "action_id": action.action_id,
+        "message": f"Створено запит на додавання транзакції: {transaction_type} {amount} грн, категорія '{category}'. Користувач має підтвердити або скасувати.",
+    }, ensure_ascii=False)
+
+
+@tool
+async def prepare_update_transaction(
+    transaction_id: int,
+    amount: float | None = None,
+    category: str | None = None,
+    description: str | None = None,
+    transaction_date: str | None = None,
+    config: RunnableConfig = None,
+) -> str:
+    """Створює PENDING-запит на оновлення існуючої транзакції. Зміни НЕ будуть застосовані одразу - користувач повинен підтвердити.
+
+    Args:
+        transaction_id: ID транзакції, яку потрібно оновити.
+        amount: Нова сума (необов'язково).
+        category: Нова категорія (необов'язково).
+        description: Новий опис (необов'язково).
+        transaction_date: Нова дата у форматі 'YYYY-MM-DD' (необов'язково).
+    """
+    telegram_id = config.get("configurable", {}).get("telegram_id")
+    if not telegram_id:
+        return json.dumps({"error": "telegram_id не знайдено в контексті"})
+
+    payload: dict = {"transaction_id": transaction_id}
+    if amount is not None:
+        payload["amount"] = amount
+    if category is not None:
+        payload["category"] = category
+    if description is not None:
+        payload["description"] = description
+    if transaction_date is not None:
+        payload["transaction_date"] = transaction_date
+
+    action = create_pending_action(
+        action_type=ActionType.UPDATE_TRANSACTION,
+        telegram_id=telegram_id,
+        payload=payload,
+    )
+
+    return json.dumps({
+        "status": "pending_confirmation",
+        "action_id": action.action_id,
+        "message": f"Створено запит на оновлення транзакції #{transaction_id}. Користувач має підтвердити або скасувати.",
+    }, ensure_ascii=False)
+
+
+@tool
+async def prepare_delete_transaction(
+    transaction_id: int,
+    config: RunnableConfig,
+) -> str:
+    """Створює PENDING-запит на видалення транзакції. Видалення НЕ станеться одразу - користувач повинен підтвердити.
+
+    Args:
+        transaction_id: ID транзакції, яку потрібно видалити.
+    """
+    telegram_id = config.get("configurable", {}).get("telegram_id")
+    if not telegram_id:
+        return json.dumps({"error": "telegram_id не знайдено в контексті"})
+
+    payload = {"transaction_id": transaction_id}
+
+    action = create_pending_action(
+        action_type=ActionType.DELETE_TRANSACTION,
+        telegram_id=telegram_id,
+        payload=payload,
+    )
+
+    return json.dumps({
+        "status": "pending_confirmation",
+        "action_id": action.action_id,
+        "message": f"Створено запит на видалення транзакції #{transaction_id}. Користувач має підтвердити або скасувати.",
+    }, ensure_ascii=False)
 

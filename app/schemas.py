@@ -73,11 +73,6 @@ class TransactionAnalysisResponse(BaseModel):
     advice: list[str] = Field(description="Конкретні поради користувачу")
 
 
-class PendingActionData(BaseModel):
-    action_id: str = Field(description="ID дії для підтвердження")
-    type: str = Field(description="Тип дії (create_transaction, update_transaction, delete_transaction)")
-    payload: dict = Field(description="Дані дії (сума, категорія тощо)")
-
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -85,7 +80,17 @@ class ChatRequest(BaseModel):
     thread_id: str = Field(min_length=1, max_length=100, description="Ідентифікатор чату")
 
 
+class PendingActionData(BaseModel):
+    action_id: str = Field(description="Унікальний ідентифікатор pending action")
+    type: str = Field(description="Тип дії: create_transaction, update_transaction, delete_transaction")
+    payload: dict = Field(description="Деталі дії (amount, category, тощо)")
+
+
 class ChatResponse(BaseModel):
     message: str = Field(description="Відповідь AI-асистента")
     thread_id: str = Field(description="Ідентифікатор чату")
-    pending_action: PendingActionData | None = Field(default=None, description="Дія, що потребує підтвердження")
+    pending_action: PendingActionData | None = Field(
+        default=None,
+        description="Дані pending action для підтвердження/скасування",
+    )
+

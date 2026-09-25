@@ -11,18 +11,16 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from typing_extensions import TypedDict
 
-import json
 from app.ai_tools import (
-    get_category_totals, 
-    get_top_expenses, 
+    get_category_totals,
+    get_top_expenses,
     get_transactions_summary,
     prepare_create_transaction,
+    prepare_delete_transaction,
     prepare_update_transaction,
-    prepare_delete_transaction
 )
 from app.check_gemini_api_key import get_gemini_api_key
 from app.prompts import get_chat_assistant_prompt
-from app.ai_actions import get_pending_action
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -123,8 +121,15 @@ async def generate_chat_response(
     thread_id: str,
     user_message: str,
     telegram_id: int,
-) -> str:
-    """Генерує відповідь AI-асистента через LangGraph з інструментами."""
+) -> tuple[str, dict | None]:
+    """Генерує відповідь AI-асистента через LangGraph з інструментами.
+
+    Returns:
+        Tuple of (response_text, pending_action_data | None).
+    """
+    import json as _json
+
+    from app.ai_actions import get_pending_action
 
     # Формуємо актуальний системний промпт із поточною датою
     current_date = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%Y-%m-%d")
@@ -160,25 +165,22 @@ async def generate_chat_response(
         else:
             response_text = str(raw_content) if raw_content else ""
 
+        # Шукаємо pending action у tool messages
         pending_action_data = None
-        for msg in reversed(result["messages"]):
-            if msg.type == "user":
-                break
-            if msg.type == "tool":
+        for msg in result["messages"]:
+            if msg.type == "tool" and isinstance(msg.content, str):
                 try:
-                    tool_content = json.loads(msg.content)
-                    if isinstance(tool_content, dict) and "action_id" in tool_content:
-                        action_id = tool_content["action_id"]
-                        action = get_pending_action(action_id)
-                        if action and action["status"] == "pending":
+                    tool_result = _json.loads(msg.content)
+                    if isinstance(tool_result, dict) and "action_id" in tool_result:
+                        action = get_pending_action(tool_result["action_id"])
+                        if action is not None:
                             pending_action_data = {
-                                "action_id": action_id,
-                                "type": action["type"],
-                                "payload": action["payload"],
+                                "action_id": action.action_id,
+                                "type": action.action_type.value,
+                                "payload": action.payload,
                             }
-                            break
-                except Exception as e:
-                    logger.error("Error parsing tool msg: %s", e)
+                except (_json.JSONDecodeError, KeyError):
+                    pass
 
         logger.info("Chat: LangGraph responded for thread_id=%s with tools", thread_id)
         return response_text, pending_action_data
@@ -190,3 +192,4 @@ async def generate_chat_response(
             str(error)[:200],
         )
         raise GeminiChatError from error
+
