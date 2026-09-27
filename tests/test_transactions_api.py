@@ -18,8 +18,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ai_analysis import (
     GeminiAnalysisError,
+    GeminiUnavailableError,
     TRANSACTION_ANALYSIS_PROMPT,
     build_transaction_analysis_input,
+)
+from app.ai_actions import (
+    ActionStatus,
+    ActionType,
+    create_pending_action,
+    get_pending_action,
 )
 from app.api import app
 from app.expenses import TransactionData, parse_transaction, save_transaction
@@ -335,6 +342,185 @@ class TransactionAPITests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(response.status_code, 502, response.text)
         self.assertNotIn("GeminiAnalysisError", response.text)
+
+        generator = AsyncMock(side_effect=GeminiUnavailableError())
+        with patch("app.api.generate_transaction_analysis", new=generator):
+            response = await self.client.post(
+                "/api/ai/analyze-transactions?telegram_id=101"
+            )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.headers["retry-after"], "5")
+        self.assertIn("перевантажений", response.json()["detail"])
+
+    async def test_ai_action_create_is_validated_and_idempotent(self):
+        action = create_pending_action(
+            action_type=ActionType.CREATE_TRANSACTION,
+            telegram_id=101,
+            payload={
+                "transaction_type": "expense",
+                "amount": "125.50",
+                "category": "  кава  ",
+                "description": "ранкова кава",
+                "transaction_date": today().isoformat(),
+            },
+        )
+
+        path = f"/api/ai/actions/{action.action_id}/confirm?telegram_id=101"
+        response = await self.client.post(path)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(get_pending_action(action.action_id).status, ActionStatus.CONFIRMED)
+        rows = (await self.client.get("/api/transactions?telegram_id=101")).json()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["amount"], "125.50")
+        self.assertEqual(rows[0]["category"], "кава")
+
+        duplicate = await self.client.post(path)
+        self.assertEqual(duplicate.status_code, 409, duplicate.text)
+        self.assertEqual(await self.counts(), [1, 1, 1])
+
+    async def test_ai_action_invalid_create_does_not_write_or_consume_action(self):
+        action = create_pending_action(
+            action_type=ActionType.CREATE_TRANSACTION,
+            telegram_id=101,
+            payload={
+                "transaction_type": "expense",
+                "amount": "-1",
+                "category": "кава",
+                "description": None,
+                "transaction_date": today().isoformat(),
+            },
+        )
+
+        response = await self.client.post(
+            f"/api/ai/actions/{action.action_id}/confirm?telegram_id=101"
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(get_pending_action(action.action_id).status, ActionStatus.PENDING)
+        self.assertEqual(await self.counts(), [0, 0, 0])
+
+    async def test_ai_action_update_changes_only_requested_fields(self):
+        original = (
+            await self.post({
+                "type": "expense",
+                "amount": "100",
+                "category": "кава",
+                "description": "до роботи",
+                "date": (today() - timedelta(days=2)).isoformat(),
+            })
+        ).json()
+        action = create_pending_action(
+            action_type=ActionType.UPDATE_TRANSACTION,
+            telegram_id=101,
+            payload={
+                "transaction_id": original["id"],
+                "amount": "250.25",
+                "category": "транспорт",
+            },
+        )
+
+        response = await self.client.post(
+            f"/api/ai/actions/{action.action_id}/confirm?telegram_id=101"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        updated = (await self.client.get("/api/transactions?telegram_id=101")).json()[0]
+        self.assertEqual(updated["amount"], "250.25")
+        self.assertEqual(updated["category"], "транспорт")
+        self.assertEqual(updated["description"], original["description"])
+        self.assertEqual(updated["date"], original["date"])
+        self.assertEqual(updated["type"], original["type"])
+        self.assertEqual(get_pending_action(action.action_id).status, ActionStatus.CONFIRMED)
+
+    async def test_ai_action_never_changes_another_users_transaction(self):
+        other = (await self.post(telegram_id=202)).json()
+        for action_type in (ActionType.UPDATE_TRANSACTION, ActionType.DELETE_TRANSACTION):
+            with self.subTest(action_type=action_type):
+                payload = {"transaction_id": other["id"]}
+                if action_type == ActionType.UPDATE_TRANSACTION:
+                    payload["amount"] = "999"
+                action = create_pending_action(
+                    action_type=action_type,
+                    telegram_id=101,
+                    payload=payload,
+                )
+                response = await self.client.post(
+                    f"/api/ai/actions/{action.action_id}/confirm?telegram_id=101"
+                )
+                self.assertEqual(response.status_code, 404, response.text)
+                self.assertEqual(get_pending_action(action.action_id).status, ActionStatus.PENDING)
+
+        rows = (await self.client.get("/api/transactions?telegram_id=202")).json()
+        self.assertEqual(rows, [other])
+
+    async def test_ai_action_delete_and_cancel(self):
+        transaction = (await self.post()).json()
+        cancelled = create_pending_action(
+            action_type=ActionType.DELETE_TRANSACTION,
+            telegram_id=101,
+            payload={"transaction_id": transaction["id"]},
+        )
+        cancel_response = await self.client.post(
+            f"/api/ai/actions/{cancelled.action_id}/cancel?telegram_id=101"
+        )
+        self.assertEqual(cancel_response.status_code, 200, cancel_response.text)
+        self.assertEqual(get_pending_action(cancelled.action_id).status, ActionStatus.CANCELLED)
+        self.assertEqual(
+            (await self.client.post(
+                f"/api/ai/actions/{cancelled.action_id}/confirm?telegram_id=101"
+            )).status_code,
+            409,
+        )
+
+        deletion = create_pending_action(
+            action_type=ActionType.DELETE_TRANSACTION,
+            telegram_id=101,
+            payload={"transaction_id": transaction["id"]},
+        )
+        delete_response = await self.client.post(
+            f"/api/ai/actions/{deletion.action_id}/confirm?telegram_id=101"
+        )
+        self.assertEqual(delete_response.status_code, 200, delete_response.text)
+        self.assertEqual(await self.counts(), [1, 1, 0])
+
+    async def test_ai_action_database_failure_can_be_retried(self):
+        async with self.engine.begin() as connection:
+            await connection.execute(text("""
+                CREATE FUNCTION fail_ai_action() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN RAISE EXCEPTION 'test AI action failure'; END $$
+            """))
+            await connection.execute(text("""
+                CREATE CONSTRAINT TRIGGER reject_ai_action AFTER INSERT ON transactions
+                DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_ai_action()
+            """))
+        action = create_pending_action(
+            action_type=ActionType.CREATE_TRANSACTION,
+            telegram_id=101,
+            payload={
+                "transaction_type": "expense",
+                "amount": "100",
+                "category": "кава",
+                "description": None,
+                "transaction_date": today().isoformat(),
+            },
+        )
+
+        response = await self.client.post(
+            f"/api/ai/actions/{action.action_id}/confirm?telegram_id=101"
+        )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertNotIn("test AI action failure", response.text)
+        self.assertEqual(get_pending_action(action.action_id).status, ActionStatus.PENDING)
+        self.assertEqual(await self.counts(), [0, 0, 0])
+
+    async def test_ai_chat_missing_key_is_an_endpoint_error_not_an_import_failure(self):
+        with (
+            patch("app.ai_chat._graph", None),
+            patch("app.ai_chat.get_gemini_api_key", side_effect=ValueError),
+        ):
+            response = await self.client.post(
+                "/api/ai/chat?telegram_id=101",
+                json={"message": "Привіт", "thread_id": "thread-1"},
+            )
+        self.assertEqual(response.status_code, 503, response.text)
 
     async def test_migration_preserves_old_rows_and_is_repeatable(self):
         await self.post()

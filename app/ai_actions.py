@@ -23,6 +23,7 @@ class ActionType(str, Enum):
 
 class ActionStatus(str, Enum):
     PENDING = "pending"
+    PROCESSING = "processing"
     CONFIRMED = "confirmed"
     CANCELLED = "cancelled"
 
@@ -65,12 +66,30 @@ def get_pending_action(action_id: str) -> PendingAction | None:
     return _pending_actions.get(action_id)
 
 
-def confirm_pending_action(action_id: str) -> PendingAction | None:
-    """Mark the action as confirmed and return it, or None if not found / not pending."""
+def reserve_pending_action(action_id: str) -> PendingAction | None:
+    """Reserve a pending action so two confirmations cannot execute it twice."""
     action = _pending_actions.get(action_id)
     if action is None or action.status != ActionStatus.PENDING:
         return None
+    action.status = ActionStatus.PROCESSING
+    return action
+
+
+def confirm_pending_action(action_id: str) -> PendingAction | None:
+    """Mark a successfully processed action as confirmed."""
+    action = _pending_actions.get(action_id)
+    if action is None or action.status != ActionStatus.PROCESSING:
+        return None
     action.status = ActionStatus.CONFIRMED
+    return action
+
+
+def release_pending_action(action_id: str) -> PendingAction | None:
+    """Return a failed reserved action to pending so the user can retry it."""
+    action = _pending_actions.get(action_id)
+    if action is None or action.status != ActionStatus.PROCESSING:
+        return None
+    action.status = ActionStatus.PENDING
     return action
 
 

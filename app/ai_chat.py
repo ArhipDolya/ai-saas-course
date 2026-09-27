@@ -55,19 +55,28 @@ def _build_llm():
     api_key = get_gemini_api_key()
 
     primary = ChatGoogleGenerativeAI(
-        model="gemini-3-flash-preview",
+        model="gemini-3.8-flash",
         google_api_key=api_key,
         temperature=0.4,
+        thinking_level="low",
+        retries=0,
+        request_timeout=15,
     )
     fallback_1 = ChatGoogleGenerativeAI(
+        model="gemini-3.7-flash",
+        google_api_key=api_key,
+        temperature=0.4,
+        thinking_level="low",
+        retries=0,
+        request_timeout=15,
+    )
+    fallback_2 = ChatGoogleGenerativeAI(
         model="gemini-3.6-flash",
         google_api_key=api_key,
         temperature=0.4,
-    )
-    fallback_2 = ChatGoogleGenerativeAI(
-        model="gemini-3.5-flash",
-        google_api_key=api_key,
-        temperature=0.4,
+        thinking_level="low",
+        retries=0,
+        request_timeout=15,
     )
 
     llm_with_fallbacks = primary.with_fallbacks([fallback_1, fallback_2])
@@ -77,23 +86,21 @@ def _build_llm():
 # ── Граф ─────────────────────────────────────────────────────────
 
 _memory = MemorySaver()
-_llm = _build_llm()
+_graph = None
 
 # Ми більше не потребуємо кешувати системний промпт, бо він статичний 
 # (окрім поточної дати, яка оновлюється).
 
 
-def _chatbot_node(state: ChatState) -> dict:
-    """Нода графу: викликає LLM з усією історією повідомлень."""
-    return {"messages": [_llm.invoke(state["messages"])]}
-
-
-def _build_graph() -> StateGraph:
+def _build_graph(llm) -> StateGraph:
     """Будує та компілює граф з інструментами та checkpointer."""
     graph_builder = StateGraph(ChatState)
     
     # Додаємо ноди
-    graph_builder.add_node("chatbot", _chatbot_node)
+    def chatbot_node(state: ChatState) -> dict:
+        return {"messages": [llm.invoke(state["messages"])]}
+
+    graph_builder.add_node("chatbot", chatbot_node)
     graph_builder.add_node("tools", ToolNode(_tools))
     
     # Будуємо маршрути
@@ -112,7 +119,13 @@ def _build_graph() -> StateGraph:
     return graph_builder.compile(checkpointer=_memory)
 
 
-_graph = _build_graph()
+def _get_graph():
+    """Build the Gemini graph lazily so a missing key cannot break the whole API."""
+    global _graph
+
+    if _graph is None:
+        _graph = _build_graph(_build_llm())
+    return _graph
 
 
 # ── Публічний API ────────────────────────────────────────────────
@@ -129,7 +142,7 @@ async def generate_chat_response(
     """
     import json as _json
 
-    from app.ai_actions import get_pending_action
+    from app.ai_actions import ActionStatus, get_pending_action
 
     # Формуємо актуальний системний промпт із поточною датою
     current_date = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%Y-%m-%d")
@@ -143,13 +156,14 @@ async def generate_chat_response(
     # Передаємо telegram_id в RunnableConfig, щоб tools могли його дістати
     config = {
         "configurable": {
-            "thread_id": thread_id,
+            "thread_id": f"{telegram_id}:{thread_id}",
             "telegram_id": telegram_id,
         }
     }
 
     try:
-        result = await _graph.ainvoke(
+        graph = _get_graph()
+        result = await graph.ainvoke(
             {"messages": messages_to_send},
             config=config,
         )
@@ -167,24 +181,29 @@ async def generate_chat_response(
 
         # Шукаємо pending action у tool messages
         pending_action_data = None
-        for msg in result["messages"]:
+        for msg in reversed(result["messages"]):
+            if msg.type in ("human", "user"):
+                break
             if msg.type == "tool" and isinstance(msg.content, str):
                 try:
                     tool_result = _json.loads(msg.content)
                     if isinstance(tool_result, dict) and "action_id" in tool_result:
                         action = get_pending_action(tool_result["action_id"])
-                        if action is not None:
+                        if action is not None and action.status == ActionStatus.PENDING:
                             pending_action_data = {
                                 "action_id": action.action_id,
                                 "type": action.action_type.value,
                                 "payload": action.payload,
                             }
-                except (_json.JSONDecodeError, KeyError):
+                            break
+                except (_json.JSONDecodeError, KeyError, TypeError):
                     pass
 
         logger.info("Chat: LangGraph responded for thread_id=%s with tools", thread_id)
         return response_text, pending_action_data
 
+    except ValueError:
+        raise
     except Exception as error:
         logger.error(
             "Chat: LangGraph failed: error_type=%s, detail=%s",
@@ -192,4 +211,3 @@ async def generate_chat_response(
             str(error)[:200],
         )
         raise GeminiChatError from error
-

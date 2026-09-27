@@ -5,11 +5,16 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException, Path, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import case, delete, func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.ai_analysis import GeminiAnalysisError, generate_transaction_analysis
+from app.ai_analysis import (
+    GeminiAnalysisError,
+    GeminiUnavailableError,
+    generate_transaction_analysis,
+)
 from app.ai_chat import GeminiChatError, generate_chat_response
 from app.database import dispose_database, get_session_factory, initialize_database
 from app.expenses import TransactionData, save_transaction
@@ -221,6 +226,12 @@ async def analyze_user_transactions(
             status_code=503,
             detail="AI-аналіз зараз не налаштований. Спробуй ще раз пізніше.",
         ) from None
+    except GeminiUnavailableError:
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini зараз перевантажений. Спробуй ще раз за кілька секунд.",
+            headers={"Retry-After": "5"},
+        ) from None
     except GeminiAnalysisError:
         raise HTTPException(
             status_code=502,
@@ -313,7 +324,13 @@ async def confirm_action(
     action_id: str = Path(..., min_length=1, max_length=50),
     telegram_id: int = Query(..., gt=0, le=MAX_TELEGRAM_ID, description="Telegram ID користувача"),
 ) -> dict:
-    from app.ai_actions import ActionType, confirm_pending_action, get_pending_action
+    from app.ai_actions import (
+        ActionType,
+        confirm_pending_action,
+        get_pending_action,
+        release_pending_action,
+        reserve_pending_action,
+    )
 
     action = get_pending_action(action_id)
     if action is None:
@@ -321,52 +338,142 @@ async def confirm_action(
     if action.telegram_id != telegram_id:
         raise HTTPException(status_code=403, detail="Ця дія належить іншому користувачу.")
 
-    confirmed = confirm_pending_action(action_id)
-    if confirmed is None:
+    reserved = reserve_pending_action(action_id)
+    if reserved is None:
         raise HTTPException(status_code=409, detail="Дія вже була підтверджена або скасована.")
 
-    # Execute the actual operation
-    if confirmed.action_type == ActionType.CREATE_TRANSACTION:
-        payload = confirmed.payload
-        transaction_type = TransactionType(payload["transaction_type"])
-        transaction_date_str = payload.get("transaction_date")
-        from datetime import date as date_cls
-        tx_date = date_cls.fromisoformat(transaction_date_str) if transaction_date_str else None
+    try:
+        payload = reserved.payload
 
-        await save_transaction(
-            telegram_id=telegram_id,
-            transaction_type=transaction_type,
-            transaction_data=TransactionData(
-                amount=Decimal(str(payload["amount"])),
-                category_name=payload["category"],
+        if reserved.action_type == ActionType.CREATE_TRANSACTION:
+            validated = TransactionCreate(
+                type=payload.get("transaction_type"),
+                amount=payload.get("amount"),
+                category=payload.get("category"),
                 description=payload.get("description"),
-                transaction_date=tx_date,
-            ),
-        )
-        logger.info("Pending action confirmed (create): action_id=%s", action_id)
-
-    elif confirmed.action_type == ActionType.DELETE_TRANSACTION:
-        payload = confirmed.payload
-        transaction_id = payload["transaction_id"]
-        statement = (
-            delete(Transaction)
-            .where(
-                Transaction.id == transaction_id,
-                Transaction.user_id.in_(select(User.id).where(User.telegram_id == telegram_id)),
+                date=payload.get("transaction_date"),
             )
-            .returning(Transaction.id)
+            await save_transaction(
+                telegram_id=telegram_id,
+                transaction_type=validated.type,
+                transaction_data=TransactionData(
+                    amount=validated.amount,
+                    category_name=validated.category,
+                    description=validated.description,
+                    transaction_date=validated.date,
+                ),
+            )
+
+        elif reserved.action_type == ActionType.DELETE_TRANSACTION:
+            transaction_id = payload.get("transaction_id")
+            if isinstance(transaction_id, bool) or not isinstance(transaction_id, int) or transaction_id <= 0:
+                raise ValueError("invalid transaction_id")
+            statement = (
+                delete(Transaction)
+                .where(
+                    Transaction.id == transaction_id,
+                    Transaction.user_id.in_(
+                        select(User.id).where(User.telegram_id == telegram_id)
+                    ),
+                )
+                .returning(Transaction.id)
+            )
+            async with get_session_factory().begin() as session:
+                deleted_id = await session.scalar(statement)
+                if deleted_id is None:
+                    raise HTTPException(status_code=404, detail="Транзакцію не знайдено.")
+
+        elif reserved.action_type == ActionType.UPDATE_TRANSACTION:
+            transaction_id = payload.get("transaction_id")
+            if isinstance(transaction_id, bool) or not isinstance(transaction_id, int) or transaction_id <= 0:
+                raise ValueError("invalid transaction_id")
+
+            async with get_session_factory().begin() as session:
+                row = (
+                    await session.execute(
+                        select(Transaction, Category.name)
+                        .join(Category, Category.id == Transaction.category_id)
+                        .where(
+                            Transaction.id == transaction_id,
+                            Transaction.user_id.in_(
+                                select(User.id).where(User.telegram_id == telegram_id)
+                            ),
+                        )
+                    )
+                ).one_or_none()
+                if row is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Транзакцію для оновлення не знайдено.",
+                    )
+
+                transaction, current_category = row
+                validated = TransactionCreate(
+                    type=transaction.transaction_type,
+                    amount=payload.get("amount", transaction.amount),
+                    category=payload.get("category", current_category),
+                    description=payload.get("description", transaction.description),
+                    date=payload.get(
+                        "transaction_date",
+                        transaction.transaction_date.isoformat(),
+                    ),
+                )
+
+                category_id = await session.scalar(
+                    insert(Category)
+                    .values(user_id=transaction.user_id, name=validated.category)
+                    .on_conflict_do_nothing(
+                        index_elements=[Category.user_id, Category.name]
+                    )
+                    .returning(Category.id)
+                )
+                if category_id is None:
+                    category_id = await session.scalar(
+                        select(Category.id).where(
+                            Category.user_id == transaction.user_id,
+                            Category.name == validated.category,
+                        )
+                    )
+
+                transaction.category_id = category_id
+                transaction.amount = validated.amount
+                transaction.description = validated.description
+                transaction.transaction_date = validated.date or transaction.transaction_date
+
+        else:
+            raise ValueError("unknown action type")
+    except HTTPException:
+        release_pending_action(action_id)
+        raise
+    except (ValidationError, ValueError, KeyError):
+        release_pending_action(action_id)
+        raise HTTPException(
+            status_code=422,
+            detail="AI підготував некоректні дані операції. Створи запит ще раз.",
+        ) from None
+    except SQLAlchemyError as error:
+        release_pending_action(action_id)
+        logger.error(
+            "Pending action failed: action_id=%s, error_type=%s, sqlstate=%s",
+            action_id,
+            type(error).__name__,
+            getattr(getattr(error, "orig", None), "sqlstate", None),
         )
-        async with get_session_factory().begin() as session:
-            deleted_id = await session.scalar(statement)
-            if deleted_id is None:
-                raise HTTPException(status_code=404, detail="Транзакцію не знайдено.")
-        logger.info("Pending action confirmed (delete): action_id=%s", action_id)
+        raise HTTPException(
+            status_code=503,
+            detail="Не вдалося виконати дію. Спробуй ще раз трохи пізніше.",
+        ) from None
+    except Exception:
+        release_pending_action(action_id)
+        logger.exception("Unexpected pending action failure: action_id=%s", action_id)
+        raise
 
-    elif confirmed.action_type == ActionType.UPDATE_TRANSACTION:
-        # Update is more complex - for now log it
-        logger.info("Pending action confirmed (update): action_id=%s", action_id)
-        # TODO: implement actual update logic
-
+    confirm_pending_action(action_id)
+    logger.info(
+        "Pending action confirmed: action_id=%s, action_type=%s",
+        action_id,
+        reserved.action_type.value,
+    )
     return {"status": "confirmed", "action_id": action_id}
 
 
@@ -389,4 +496,3 @@ async def cancel_action(
 
     logger.info("Pending action cancelled: action_id=%s", action_id)
     return {"status": "cancelled", "action_id": action_id}
-

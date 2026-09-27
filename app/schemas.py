@@ -67,10 +67,14 @@ class TransactionAnalysisResponse(BaseModel):
 
     summary: str = Field(description="Короткий загальний висновок")
     top_expense_categories: list[str] = Field(
+        max_length=3,
         description="До трьох категорій з найбільшими сумарними витратами"
     )
-    risks: list[str] = Field(description="Фінансові ризики, підтверджені транзакціями")
-    advice: list[str] = Field(description="Конкретні поради користувачу")
+    risks: list[str] = Field(
+        max_length=3,
+        description="Фінансові ризики, підтверджені транзакціями",
+    )
+    advice: list[str] = Field(max_length=3, description="Конкретні поради користувачу")
 
 
 class ChatRequest(BaseModel):
@@ -93,4 +97,3 @@ class ChatResponse(BaseModel):
         default=None,
         description="Дані pending action для підтвердження/скасування",
     )
-
