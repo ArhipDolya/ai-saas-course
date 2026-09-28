@@ -49,6 +49,33 @@ docker compose up --build
 `requirements.txt`, `Dockerfile`, `docker-compose.yml` або `.env`, зупиніть
 поточний процес і запустіть цю саму команду ще раз.
 
+## Розгортання на Render
+
+Production-образ [`Dockerfile.render`](Dockerfile.render) збирає React dashboard
+і запускає FastAPI, який віддає frontend та `/api/*` з одного домену. Сервер
+слухає `0.0.0.0` і порт зі змінної `PORT`, яку задає Render. Blueprint
+[`render.yaml`](render.yaml) вже містить Dockerfile, регіон і health check.
+
+1. Запуш зміни до GitHub та у Render обери **New → Blueprint**.
+2. Підключи репозиторій і підтвердь конфігурацію з `render.yaml`.
+3. Коли Render попросить секрети, задай:
+   - `DATABASE_URL` — PostgreSQL connection string Neon;
+   - `GEMINI_API_KEY` — ключ Gemini API.
+4. Після deploy перевір `/health`, головну сторінку та `/docs`.
+
+Значення секретів не треба додавати до Dockerfile, `render.yaml` або Git.
+
+Telegram-бот не запускається всередині web-сервісу. Якщо він також потрібен на
+Render, створи окремий **Background Worker** з того самого репозиторію:
+
+- Runtime: `Docker`;
+- Dockerfile Path: `./Dockerfile.render`;
+- Docker Command: `python -m app.main`;
+- Environment: `BOT_TOKEN` і `DATABASE_URL`.
+
+Для бота залиш один worker instance, інакше Telegram long polling конфліктуватиме.
+Background Worker може потребувати платного плану Render.
+
 ## API транзакцій
 
 Разом із Telegram-ботом Docker Compose запускає API для майбутнього
