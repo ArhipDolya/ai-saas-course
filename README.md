@@ -59,6 +59,39 @@ Dashboard доступний за адресою `http://localhost:5173`. Вве
 у правому верхньому куті сторінки, щоб dashboard завантажив твої дані через
 `/api/transactions` і `/api/summary`.
 
+## Деплой API як Render Web Service
+
+Для production-деплою API використовується окремий `Dockerfile.render`. Він
+запускає лише FastAPI через Uvicorn, слухає `0.0.0.0` і порт зі змінної
+середовища `PORT`, яку надає Render. Локальний `Dockerfile` залишається точкою
+запуску Telegram-бота.
+
+Файл `render.yaml` описує Docker Web Service та HTTP health check `GET /health`.
+Ендпоінт повертає `200 OK` і не виконує запит до Neon; доступність БД окремо
+перевіряється під час запуску застосунку.
+
+Перед деплоєм:
+
+1. Завантаж репозиторій до Git-провайдера, який підтримує Render.
+2. У Render обери **New → Blueprint** і підключи репозиторій. Render прочитає
+   `render.yaml` та збере образ із `Dockerfile.render`.
+3. Під час створення Blueprint задай секретні змінні `DATABASE_URL` і
+   `GEMINI_API_KEY`. Не додавай їхні значення до Git.
+4. Після успішного деплою перевір `https://<service>.onrender.com/health` і
+   `https://<service>.onrender.com/docs`.
+
+Production-образ можна перевірити локально:
+
+```bash
+docker build -f Dockerfile.render -t finance-saas-render .
+docker run --rm --env-file .env -e PORT=10000 -p 10000:10000 finance-saas-render
+curl http://localhost:10000/health
+```
+
+Цей Web Service розгортає лише API. Telegram-боту потрібен окремий Background
+Worker, а Vite dashboard слід розгорнути окремим Static Site або додати його
+production-збірку до API в окремому кроці.
+
 Щоб отримати транзакції конкретного користувача, виконай запит:
 
 ```text

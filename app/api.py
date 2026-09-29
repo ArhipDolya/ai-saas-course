@@ -53,6 +53,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Finance SaaS API", lifespan=lifespan)
 
 
+@app.get("/health", tags=["health"])
+async def health() -> dict[str, str]:
+    """Підтверджує, що HTTP-процес запущений і приймає запити."""
+    return {"status": "ok"}
+
+
 @app.post("/api/transactions", response_model=TransactionResponse, status_code=201)
 async def create_transaction(
     payload: TransactionCreate,

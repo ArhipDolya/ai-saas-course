@@ -36,6 +36,17 @@ from app.schemas import TransactionAnalysisResponse
 from app.transaction_rules import today
 
 
+class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_returns_ok_without_database_query(self):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+
 class TransactionAnalysisContractTests(unittest.TestCase):
     def test_prompt_describes_project_and_exact_response_fields(self):
         self.assertIn("Finance SaaS", TRANSACTION_ANALYSIS_PROMPT)
