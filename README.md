@@ -59,12 +59,14 @@ Dashboard доступний за адресою `http://localhost:5173`. Вве
 у правому верхньому куті сторінки, щоб dashboard завантажив твої дані через
 `/api/transactions` і `/api/summary`.
 
-## Деплой API як Render Web Service
+## Деплой застосунку як Render Web Service
 
-Для production-деплою API використовується окремий `Dockerfile.render`. Він
-запускає лише FastAPI через Uvicorn, слухає `0.0.0.0` і порт зі змінної
-середовища `PORT`, яку надає Render. Локальний `Dockerfile` залишається точкою
-запуску Telegram-бота.
+Для production-деплою використовується окремий `Dockerfile.render`. На першому
+етапі він збирає React dashboard через Vite, а потім додає результат до
+Python-образу. FastAPI віддає dashboard і `/api/*` з одного домену через
+production entry point `app.render_api`. Uvicorn слухає `0.0.0.0` і порт зі
+змінної середовища `PORT`, яку надає Render. Локальний `Dockerfile` залишається
+точкою запуску Telegram-бота.
 
 Файл `render.yaml` описує Docker Web Service та HTTP health check `GET /health`.
 Ендпоінт повертає `200 OK` і не виконує запит до Neon; доступність БД окремо
@@ -77,7 +79,8 @@ Dashboard доступний за адресою `http://localhost:5173`. Вве
    `render.yaml` та збере образ із `Dockerfile.render`.
 3. Під час створення Blueprint задай секретні змінні `DATABASE_URL` і
    `GEMINI_API_KEY`. Не додавай їхні значення до Git.
-4. Після успішного деплою перевір `https://<service>.onrender.com/health` і
+4. Після успішного деплою перевір головну сторінку, а також маршрути
+   `https://<service>.onrender.com/health` і
    `https://<service>.onrender.com/docs`.
 
 Production-образ можна перевірити локально:
@@ -88,9 +91,10 @@ docker run --rm --env-file .env -e PORT=10000 -p 10000:10000 finance-saas-render
 curl http://localhost:10000/health
 ```
 
-Цей Web Service розгортає лише API. Telegram-боту потрібен окремий Background
-Worker, а Vite dashboard слід розгорнути окремим Static Site або додати його
-production-збірку до API в окремому кроці.
+Цей Web Service розгортає dashboard та API разом. Telegram-бот у ньому не
+запускається: для постійної роботи бота потрібен окремий Render Background
+Worker із командою `python -m app.main` і змінними `BOT_TOKEN` та
+`DATABASE_URL`.
 
 Щоб отримати транзакції конкретного користувача, виконай запит:
 
